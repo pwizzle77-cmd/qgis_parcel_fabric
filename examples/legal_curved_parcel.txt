@@ -1,0 +1,4 @@
+Commencing at a found monument;
+thence North 10 degrees East, 500 feet to the true point of beginning;
+thence along a curve to the right, having a radius of 100 feet, an arc length of 314.159265 feet, and a chord bearing of North 90 degrees East, with a chord distance of 200 feet;
+thence West, 200 feet to the point of beginning.

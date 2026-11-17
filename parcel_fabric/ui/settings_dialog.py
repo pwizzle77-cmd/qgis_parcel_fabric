@@ -1,0 +1,246 @@
+# -*- coding: utf-8 -*-
+"""Fabric Settings: general, documents and parcel numbers.
+
+Settings live in the fabric's QPF_Settings table, so everyone who opens the
+fabric gets the same ones.
+"""
+
+import json
+import os
+
+from qgis.core import Qgis, QgsFeatureRequest, QgsProject
+from qgis.gui import QgsFieldComboBox, QgsMapLayerComboBox
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import (
+    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
+    QTabWidget, QVBoxLayout, QWidget,
+)
+
+from ..core import documents as D
+from ..core.fabric import type_expr
+
+SAMPLE = D.record_values("Sunny Acres", "Plat", "5", "22", "2024-03-01", "{0A1B2C3D-0000}")
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, fabric, parent=None):
+        super().__init__(parent)
+        self.fabric = fabric
+        s = fabric.settings
+        self.setWindowTitle("Fabric Settings - %s" % fabric.name)
+        self.setMinimumWidth(560)
+        lay = QVBoxLayout(self)
+        tabs = QTabWidget()
+        lay.addWidget(tabs)
+
+        # ---- General ---------------------------------------------------
+        g = QWidget()
+        gf = QFormLayout(g)
+        self.name = QLineEdit(fabric.name)
+        self.types = QLineEdit(", ".join(fabric.parcel_types))
+        self.types.setToolTip("Values allowed in the ParcelType field, comma separated")
+        self.tol = QDoubleSpinBox()
+        self.tol.setDecimals(3)
+        self.tol.setRange(0.001, 10)
+        self.tol.setValue(fabric.tolerance)
+        self.tol.setSuffix(" ft")
+        self.ratio = QDoubleSpinBox()
+        self.ratio.setDecimals(0)
+        self.ratio.setRange(100, 1000000)
+        self.ratio.setPrefix("1:")
+        self.ratio.setValue(fabric.warn_ratio)
+        self.packed = QCheckBox("Read 45.3015 as 45°30'15\" (packed DD.MMSS)")
+        self.packed.setChecked(fabric.packed_dms)
+        foot = {"us_survey": "US survey foot", "international": "International foot"}.get(
+            s.get("foot"), s.get("foot"))
+        gf.addRow("Fabric name", self.name)
+        gf.addRow("Parcel types", self.types)
+        gf.addRow("Snap tolerance", self.tol)
+        gf.addRow("Flag misclose worse than", self.ratio)
+        gf.addRow("", self.packed)
+        gf.addRow("Distance unit", QLabel("%s (set when the fabric was created)" % foot))
+        tabs.addTab(g, "General")
+
+        # ---- Documents -------------------------------------------------
+        d = QWidget()
+        df = QFormLayout(d)
+        row = QHBoxLayout()
+        self.root = QLineEdit(s.get("doc_root", ""))
+        self.root.setPlaceholderText(r"e.g. \\server\GIS\Records  or  E:\Records")
+        browse = QPushButton("Browse...")
+        browse.clicked.connect(self._browse_root)
+        row.addWidget(self.root, 1)
+        row.addWidget(browse)
+        self.folder_pat = QLineEdit(s.get("doc_folder_pattern") or D.DEFAULT_FOLDER)
+        self.name_pat = QLineEdit(s.get("doc_name_pattern") or D.DEFAULT_NAME)
+        self.preview = QLabel()
+        self.preview.setWordWrap(True)
+        self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        tokens = QLabel("Tokens: {type} {book} {page} {name} {year} {date} {id}. "
+                        "Use / for sub-folders. Folders are created as needed and a file "
+                        "is never overwritten.")
+        tokens.setWordWrap(True)
+        tokens.setStyleSheet("color: palette(mid);")
+        df.addRow("Document folder", row)
+        df.addRow("Folder pattern", self.folder_pat)
+        df.addRow("File name pattern", self.name_pat)
+        df.addRow("", tokens)
+        df.addRow("Example", self.preview)
+        for w in (self.root, self.folder_pat, self.name_pat):
+            w.textChanged.connect(self._update_preview)
+        self._update_preview()
+        tabs.addTab(d, "Documents")
+
+        # ---- Parcel numbers --------------------------------------------
+        n = QWidget()
+        nf = QFormLayout(n)
+        intro = QLabel("Numbers look like <b>12-4S-16-02942-000</b>: section, township, range "
+                       "from the sections layer, then the next unused 5-digit ID in that "
+                       "section-township-range, then the split (000 for a new parcel).")
+        intro.setWordWrap(True)
+        nf.addRow(intro)
+        self.plss = QgsMapLayerComboBox()
+        self.plss.setFilters(Qgis.LayerFilter.PolygonLayer)
+        self.plss.setAllowEmptyLayer(True)
+        self.fsec, self.ftwp, self.ftdir, self.frng = (QgsFieldComboBox() for _ in range(4))
+        self.ftdir.setAllowEmptyFieldName(True)
+        self.plss.layerChanged.connect(self._plss_changed)
+        nf.addRow("PLSS sections layer", self.plss)
+        nf.addRow("Section field", self.fsec)
+        nf.addRow("Township field", self.ftwp)
+        nf.addRow("Township N/S field", self.ftdir)
+        nf.addRow("Range field", self.frng)
+        tip = QLabel("Leave Township N/S empty when the township field already holds it (e.g. 04S).")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: palette(mid);")
+        nf.addRow("", tip)
+        self.on_build = QCheckBox("Number new parcels when they are built")
+        self.on_build.setChecked(s.get("number_on_build", "1") == "1")
+        nf.addRow("", self.on_build)
+        self.num_types = QListWidget()
+        self.num_types.setMaximumHeight(90)
+        chosen = set(fabric.number_types)
+        for t in fabric.parcel_types:
+            it = QListWidgetItem(t)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if t in chosen else Qt.CheckState.Unchecked)
+            self.num_types.addItem(it)
+        nf.addRow("Parcel types that get numbers", self.num_types)
+        tabs.addTab(n, "Parcel numbers")
+        self._select_plss()
+
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    # ------------------------------------------------------------------
+    def _browse_root(self):
+        p = QFileDialog.getExistingDirectory(self, "Document folder", self.root.text())
+        if p:
+            self.root.setText(p)
+
+    def _update_preview(self):
+        rel = D.relative_path(self.folder_pat.text(), self.name_pat.text(), SAMPLE, ".pdf")
+        root = self.root.text().strip() or "<document folder>"
+        self.preview.setText("Plat, book 5, page 22  →  %s" % os.path.join(root, *rel))
+
+    def _select_plss(self):
+        s = self.fabric.settings
+        src = s.get("plss_source")
+        if src:
+            for lyr in QgsProject.instance().mapLayers().values():
+                if getattr(lyr, "source", None) and lyr.source() == src:
+                    self.plss.setLayer(lyr)
+                    break
+            else:
+                self.plss.setLayer(None)
+        else:
+            self.plss.setLayer(None)
+        self._plss_changed(self.plss.currentLayer())
+        for combo, key in ((self.fsec, "plss_section_field"), (self.ftwp, "plss_township_field"),
+                           (self.ftdir, "plss_township_dir_field"), (self.frng, "plss_range_field")):
+            if s.get(key):
+                combo.setField(s.get(key))
+        if src and self.plss.currentLayer() is None:
+            self.plss.setToolTip("Saved layer isn't in this project:\n%s" % src)
+
+    def _plss_changed(self, lyr):
+        for c in (self.fsec, self.ftwp, self.ftdir, self.frng):
+            c.setLayer(lyr)
+        if lyr is None:
+            return
+        names = {f.name().lower(): f.name() for f in lyr.fields()}
+
+        def guess(combo, *cands):
+            if combo.currentField():
+                return
+            for c in cands:
+                if c in names:
+                    combo.setField(names[c])
+                    return
+        guess(self.fsec, "section", "sec", "frstdivno", "sect")
+        guess(self.ftwp, "township", "twp", "town", "twnshp")
+        guess(self.frng, "range", "rng", "rge")
+        guess(self.ftdir, "twpdir", "twp_dir", "tdir", "townshipdir")
+
+    # ------------------------------------------------------------------
+    def _ok(self):
+        types = [t.strip() for t in self.types.text().split(",") if t.strip()]
+        if not types:
+            QMessageBox.warning(self, "Fabric Settings", "Keep at least one parcel type.")
+            return
+        removed = [t for t in self.fabric.parcel_types if t not in types]
+        in_use = [t for t in removed if self._type_used(t)]
+        if in_use:
+            QMessageBox.warning(self, "Fabric Settings",
+                                "These parcel types are still used by features: %s" % ", ".join(in_use))
+            return
+        root = self.root.text().strip()
+        if root and not os.path.isdir(root):
+            if QMessageBox.question(self, "Fabric Settings",
+                                    "The document folder doesn't exist yet. Create it?\n%s" % root) \
+                    != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                os.makedirs(root, exist_ok=True)
+            except OSError as e:
+                QMessageBox.critical(self, "Fabric Settings", str(e))
+                return
+        lyr = self.plss.currentLayer()
+        if lyr is not None and not (self.fsec.currentField() and self.ftwp.currentField()
+                                    and self.frng.currentField()):
+            QMessageBox.warning(self, "Fabric Settings", "Pick the section, township and range fields.")
+            return
+        num_types = [self.num_types.item(i).text() for i in range(self.num_types.count())
+                     if self.num_types.item(i).checkState() == Qt.CheckState.Checked]
+        values = {
+            "name": self.name.text().strip() or "Parcel Fabric",
+            "parcel_types": json.dumps(types),
+            "snap_tolerance": str(self.tol.value()),
+            "misclose_warn_ratio": str(int(self.ratio.value())),
+            "packed_dms": "1" if self.packed.isChecked() else "0",
+            "doc_root": root,
+            "doc_folder_pattern": self.folder_pat.text().strip() or D.DEFAULT_FOLDER,
+            "doc_name_pattern": self.name_pat.text().strip() or D.DEFAULT_NAME,
+            "plss_provider": lyr.providerType() if lyr else "",
+            "plss_source": lyr.source() if lyr else "",
+            "plss_section_field": self.fsec.currentField() if lyr else "",
+            "plss_township_field": self.ftwp.currentField() if lyr else "",
+            "plss_township_dir_field": self.ftdir.currentField() if lyr else "",
+            "plss_range_field": self.frng.currentField() if lyr else "",
+            "number_on_build": "1" if self.on_build.isChecked() else "0",
+            "number_types": json.dumps(num_types if len(num_types) < len(types) else []),
+        }
+        try:
+            self.fabric.save_settings(values)
+        except Exception as e:
+            QMessageBox.critical(self, "Fabric Settings", str(e))
+            return
+        self.accept()
+
+    def _type_used(self, t):
+        req = QgsFeatureRequest().setFilterExpression(type_expr(t)).setLimit(1)
+        return any(True for _ in self.fabric.parcels.getFeatures(req)) or \
+            any(True for _ in self.fabric.lines.getFeatures(req))

@@ -20,7 +20,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core import cogo as C
 from ..core import deed_ai as A
-from ..core import ollama as O
+from ..core import ollama as OL
 from ..core import units as U
 from ..core.legal_import import parse, to_course
 
@@ -55,7 +55,7 @@ class DeedReaderDialog(QDialog):
 
         form = QFormLayout()
         urow = QHBoxLayout()
-        self.url = QLineEdit(s.value(S_URL, O.DEFAULT_URL, type=str))
+        self.url = QLineEdit(s.value(S_URL, OL.DEFAULT_URL, type=str))
         refresh = QPushButton("Find Models")
         refresh.clicked.connect(self._load_models)
         urow.addWidget(self.url, 1)
@@ -141,11 +141,11 @@ class DeedReaderDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _load_models(self, quiet=False):
-        url = self.url.text().strip() or O.DEFAULT_URL
+        url = self.url.text().strip() or OL.DEFAULT_URL
         s = QgsSettings()
         try:
-            models = O.list_models(url)
-        except O.OllamaError as e:
+            models = OL.list_models(url)
+        except OL.OllamaError as e:
             if not quiet:
                 QMessageBox.warning(self, self.windowTitle(), str(e))
             self.status.setText(str(e))
@@ -155,7 +155,7 @@ class DeedReaderDialog(QDialog):
             combo.clear()
             combo.addItems(models)
             saved = s.value(key, "", type=str)
-            combo.setCurrentText(saved if saved and (saved in models or not models) else O.pick(models, *prefs))
+            combo.setCurrentText(saved if saved and (saved in models or not models) else OL.pick(models, *prefs))
         if models:
             s.setValue(S_URL, url)
 
@@ -213,7 +213,7 @@ class DeedReaderDialog(QDialog):
                 if task.isCanceled():
                     raise RuntimeError("Cancelled")
                 task.setProgress(100.0 * i / max(1, len(images)))
-                out.append(O.chat(url, model, A.ocr_prompt(model), [img]))
+                out.append(OL.chat(url, model, A.ocr_prompt(model), [img]))
             return "ocr", out
 
         def done(result):
@@ -243,7 +243,7 @@ class DeedReaderDialog(QDialog):
         url, model = self.url.text().strip(), self.llm_model.currentText()
 
         def work(task):
-            return O.chat(url, model, A.FIND_PROMPT % text[:20000])
+            return OL.chat(url, model, A.FIND_PROMPT % text[:20000])
 
         def done(result):
             # keep only what is really in the deed
@@ -360,7 +360,7 @@ class DeedReaderDialog(QDialog):
                 if task.isCanceled():
                     raise RuntimeError("Cancelled")
                 task.setProgress(100.0 * k / len(sources))
-                answers.append(O.chat_json(url, model, A.CALLS_PROMPT % src, A.CALL_SCHEMA))
+                answers.append(OL.chat_json(url, model, A.CALLS_PROMPT % src, A.CALL_SCHEMA))
             return answers
 
         def done(answers):
@@ -432,5 +432,5 @@ def _describe(c):
         side = "right" if c.radius > 0 else "left"
         kind = "tangent" if c.dir_kind == C.DIR_TANGENT else "chord"
         return "Curve %s, R %.2f, arc %.2f, %s %s" % (side, abs(c.radius), c.arc_length, kind,
-                                                     U.azimuth_to_bearing(c.azimuth))
+                                                      U.azimuth_to_bearing(c.azimuth))
     return "%s  %.2f ft" % (U.azimuth_to_bearing(c.azimuth), c.distance)

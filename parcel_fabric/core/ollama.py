@@ -16,12 +16,20 @@ class OllamaError(RuntimeError):
     pass
 
 
+def _url(base, path):
+    """http(s) only - never file:// or other schemes urllib would accept."""
+    full = base.strip().rstrip("/") + path
+    if not full.lower().startswith(("http://", "https://")):
+        raise OllamaError("The Ollama URL must start with http:// or https:// (got %r)." % base)
+    return full
+
+
 def _post(url, path, body, timeout):
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url.rstrip("/") + path, data=data,
+    req = urllib.request.Request(_url(url, path), data=data,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 - scheme checked in _url
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
@@ -32,9 +40,9 @@ def _post(url, path, body, timeout):
 
 def list_models(url=DEFAULT_URL, timeout=5):
     """Names of the models pulled into Ollama, e.g. ['qwen2.5vl:7b', ...]."""
-    req = urllib.request.Request(url.rstrip("/") + "/api/tags")
+    req = urllib.request.Request(_url(url, "/api/tags"))
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 - scheme checked in _url
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError) as e:
         raise OllamaError("Can't reach Ollama at %s (%s). Is it running?" % (url, getattr(e, "reason", e)))

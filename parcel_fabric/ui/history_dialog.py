@@ -390,7 +390,7 @@ td,th{border:1px solid #ddd;padding:3px 8px;text-align:left} img{max-width:100%%
             bits = [html.escape(rec["Name"] or "")]
             if rec["Book"] or rec["Page"]:
                 bits.append("Book %s, Page %s" % (html.escape(str(rec["Book"] or "")),
-                                                 html.escape(str(rec["Page"] or ""))))
+                                                  html.escape(str(rec["Page"] or ""))))
             if rec["QPF_DocumentURL"]:
                 url = str(rec["QPF_DocumentURL"])
                 href = url if "://" in url else QUrl.fromLocalFile(url).toString()

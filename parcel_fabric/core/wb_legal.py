@@ -1,5 +1,7 @@
-"""Copied from COGO Workbench (same author, GPL-2.0-or-later). Keep in sync by hand."""
-"""Conservative, offline extraction of explicit metes-and-bounds calls."""
+"""Conservative, offline extraction of explicit metes-and-bounds calls.
+
+Copied from COGO Workbench (same author, GPL-2.0-or-later). Keep in sync by hand.
+"""
 from dataclasses import dataclass
 import re
 
@@ -176,8 +178,8 @@ def parse_description(text, boundary_only=False):
             parts = [('Commencement', text[:pob.end()]), ('Boundary', text[pob.end():])]
         else:
             ambiguity = ('Commence is followed only by a closing Point of Beginning. '
-                'If all calls form the parcel boundary, select “All calls are boundary” and extract again; '
-                'otherwise supply the boundary calls after the commencement tie.')
+                         'If all calls form the parcel boundary, select “All calls are boundary” and extract again; '
+                         'otherwise supply the boundary calls after the commencement tie.')
     rows = []
     for phase, part in parts:
         chunks = SPLIT.split(part.lstrip(' ;,.\n'))

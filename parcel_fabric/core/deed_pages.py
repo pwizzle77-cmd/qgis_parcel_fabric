@@ -10,7 +10,7 @@ already contain text give that text directly (no OCR needed).
 import base64
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404 - only runs pdftoppm, found on PATH, with a fixed argument list
 import tempfile
 
 from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
@@ -121,8 +121,8 @@ def _pdf_poppler(path, dpi):
         return None
     tmp = tempfile.mkdtemp(prefix="deed_")
     try:
-        subprocess.run([exe, "-r", str(dpi), "-png", path, os.path.join(tmp, "p")], check=True,
-                       capture_output=True, timeout=300)
+        subprocess.run([exe, "-r", str(int(dpi)), "-png", path, os.path.join(tmp, "p")],  # nosec B603
+                       check=True, capture_output=True, timeout=300, shell=False)
         pages = []
         for name in sorted(os.listdir(tmp)):
             img = QImage(os.path.join(tmp, name))

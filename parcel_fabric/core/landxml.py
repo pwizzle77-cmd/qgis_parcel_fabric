@@ -7,7 +7,24 @@ Each parcel comes back as a name and a list of segments ("line", a, b) or
 """
 
 import math
-import xml.etree.ElementTree as ET
+
+try:
+    from defusedxml import ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET  # nosec B405 - DTDs are refused in _parse before parsing
+
+
+class LandXMLError(ValueError):
+    pass
+
+
+def _parse(text):
+    """LandXML never needs a DTD; refusing one blocks entity-expansion and
+    external-entity tricks even without defusedxml."""
+    head = text[:4096].upper()
+    if "<!DOCTYPE" in head or "<!ENTITY" in text.upper():
+        raise LandXMLError("This XML file declares a DTD or entities, which LandXML doesn't use - not read.")
+    return ET.fromstring(text)  # nosec B314 - DTD/entities refused above
 
 
 def _local(tag):
@@ -42,9 +59,11 @@ def _arc_mid(start, center, end, rot):
 def read(path_or_text):
     """[(parcel name, segments, attributes dict)] from a LandXML file or string."""
     if path_or_text.lstrip().startswith("<"):
-        root = ET.fromstring(path_or_text)
+        root = _parse(path_or_text)
     else:
-        root = ET.parse(path_or_text).getroot()
+        with open(path_or_text, "rb") as fh:
+            raw = fh.read()
+        root = _parse(raw.decode("utf-8", "replace"))
     # named points (CgPoints) that geometry may refer to with pntRef
     pts = {}
     for el in root.iter():

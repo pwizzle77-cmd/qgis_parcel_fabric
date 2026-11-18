@@ -64,10 +64,10 @@ class ExchangeDialog(QDialog):
         w = QWidget()
         f = QFormLayout(w)
         info = QLabel("Copies an ArcGIS Pro parcel fabric (exported to a File Geodatabase or GeoPackage) "
-                        "into this fabric. Field names match, so records, points, lines and parcels come "
-                        "across with their GlobalIDs and record links; each Pro parcel type goes into "
-                        "Parcels / Parcel_Lines with its ParcelType. Z/M is dropped and coordinates are "
-                        "reprojected to the fabric's CRS. Import into an empty fabric.")
+                      "into this fabric. Field names match, so records, points, lines and parcels come "
+                      "across with their GlobalIDs and record links; each Pro parcel type goes into "
+                      "Parcels / Parcel_Lines with its ParcelType. Z/M is dropped and coordinates are "
+                      "reprojected to the fabric's CRS. Import into an empty fabric.")
         info.setWordWrap(True)
         f.addRow(info)
         self.pro_path = QLineEdit()
@@ -110,8 +110,8 @@ class ExchangeDialog(QDialog):
         # use the (possibly edited) parcel type names from the table
         types = {}
         for i in range(self.pro_tbl.rowCount()):
-            types[self.pro_tbl.item(i, 0).text().strip()] = (self.pro_tbl.item(i, 1).text(),
-                                                            self.pro_tbl.item(i, 2).text())
+            name = self.pro_tbl.item(i, 0).text().strip()
+            types[name] = (self.pro_tbl.item(i, 1).text(), self.pro_tbl.item(i, 2).text())
         tables = dict(self.pro_tables, types=types)
         try:
             for m in X.import_pro(self.fab, self.pro_path.text(), tables, feedback=self._say):
@@ -134,7 +134,7 @@ class ExchangeDialog(QDialog):
         f.addRow(info)
         self.xml_path = QLineEdit()
         f.addRow("LandXML file", _file_row(self.xml_path, lambda: self._pick(self.xml_path,
-                                                                            "LandXML (*.xml *.landxml)")))
+                                                                             "LandXML (*.xml *.landxml)")))
         self.xml_type = QComboBox()
         if self.fab is not None:
             self.xml_type.addItems(self.fab.parcel_types)

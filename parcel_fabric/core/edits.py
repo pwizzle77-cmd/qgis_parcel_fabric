@@ -502,7 +502,8 @@ def merge_parcels(fabric, parents, record, keep_number=None):
     elif ptype in fabric.number_types:
         try:
             PN.number_new(fabric, [kid])
-            values = {k: kid[k] for k in ("ParcelNumber", "Section", "Township", "Range", "ParcelID", "ParcelSeq", "SplitNo")}
+            values = {k: kid[k] for k in ("ParcelNumber", "Section", "Township", "Range", "ParcelID",
+                                          "ParcelSeq", "SplitNo")}
         except PN.NumberingNotSetUp as e:
             res.messages.append("merged parcel not numbered: %s" % e)
     if values:

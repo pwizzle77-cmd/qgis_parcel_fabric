@@ -48,3 +48,9 @@ def test_read_curve_mid_point():
     assert math.hypot(*m) == pytest.approx(100)
     assert m[0] == pytest.approx(100 * math.cos(math.radians(45)))
     assert abs(W.signed_area(segs)) == pytest.approx(math.pi * 100 * 100 / 4)
+
+
+def test_refuses_entities():
+    evil = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><LandXML>&a;</LandXML>'
+    with pytest.raises(X.LandXMLError):
+        X.read(evil)

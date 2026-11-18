@@ -235,7 +235,7 @@ def compute(start, courses, close_to=None, rotation=0.0, scale=1.0):
 
 def loop_area(legs):
     """Area of a closed loop of legs, curves included (always positive)."""
-    pts = [l.start for l in legs]
+    pts = [lx.start for lx in legs]
     s = 0.0
     n = len(pts)
     for i in range(n):
@@ -243,15 +243,15 @@ def loop_area(legs):
         x2, y2 = pts[(i + 1) % n]
         s += x1 * y2 - x2 * y1
     signed = s / 2.0          # positive = counter-clockwise in x/y space
-    for l in legs:
-        if l.course.is_curve:
+    for lx in legs:
+        if lx.course.is_curve:
             # A right curve bulges to the LEFT of its chord, a left curve to
             # the right.  With the signed area positive for a counter-
             # clockwise ring (interior on the left), a left bulge eats into
             # the interior (subtract) and a right bulge adds to it.  The same
             # rule holds for clockwise rings because the sign flips too.
-            seg = segment_area(l.course)
-            signed += seg if l.course.side < 0 else -seg
+            seg = segment_area(lx.course)
+            signed += seg if lx.course.side < 0 else -seg
     return abs(signed)
 
 
@@ -261,27 +261,27 @@ def compass_rule(result, close_to):
     Returns new courses (inverse of the adjusted points). Curves keep their
     radius; their arc length is recomputed from the adjusted chord.
     """
-    total = sum(l.length for l in result.legs)
+    total = sum(lx.length for lx in result.legs)
     if total <= 0:
-        return [l.course for l in result.legs]
+        return [lx.course for lx in result.legs]
     dx, dy = result.misclose_dx, result.misclose_dy
     run = 0.0
     adj = [result.legs[0].start]
-    for l in result.legs:
-        run += l.length
+    for lx in result.legs:
+        run += lx.length
         f = run / total
-        adj.append((l.end[0] - dx * f, l.end[1] - dy * f))
+        adj.append((lx.end[0] - dx * f, lx.end[1] - dy * f))
     # the last point now lands exactly on close_to
     adj[-1] = tuple(close_to)
     out = []
-    for i, l in enumerate(result.legs):
+    for i, lx in enumerate(result.legs):
         az, dist = inverse(adj[i][0], adj[i][1], adj[i + 1][0], adj[i + 1][1])
-        if l.course.is_curve:
-            r = l.course.radius
+        if lx.course.is_curve:
+            r = lx.course.radius
             arc = 2.0 * abs(r) * math.asin(min(1.0, dist / (2.0 * abs(r))))
-            out.append(Course(CURVE, az, None, r, arc, DIR_CHORD, l.course.note))
+            out.append(Course(CURVE, az, None, r, arc, DIR_CHORD, lx.course.note))
         else:
-            out.append(Course(LINE, az, dist, note=l.course.note))
+            out.append(Course(LINE, az, dist, note=lx.course.note))
     return out
 
 

@@ -156,8 +156,8 @@ def result_layers(fabric, net, res, ellipse_scale=100.0):
         return lyr
 
     pts = mem("Point", "Adjusted points", [("point_fid", "Int"), ("shift_ft", "Double"), ("dx", "Double"),
-                                            ("dy", "Double"), ("sd_major", "Double"), ("sd_minor", "Double"),
-                                            ("mode", "QString")])
+                                           ("dy", "Double"), ("sd_major", "Double"), ("sd_minor", "Double"),
+                                           ("mode", "QString")])
     ell = mem("Polygon", "Error ellipses (x%g)" % ellipse_scale, [("point_fid", "Int"), ("sd_major", "Double"),
                                                                   ("sd_minor", "Double")])
     vec = mem("LineString", "Point movements", [("point_fid", "Int"), ("shift_ft", "Double")])

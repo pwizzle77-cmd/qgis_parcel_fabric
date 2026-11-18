@@ -304,8 +304,9 @@ def _dates(fabric, records):
     try:
         from .history import refresh_dates
         refresh_dates(fabric, [r for r in records if r])
-    except Exception:
-        pass
+    except Exception as e:      # history dates are a convenience; report, don't fail the edit
+        from qgis.core import Qgis, QgsMessageLog
+        QgsMessageLog.logMessage("History dates not refreshed: %s" % e, "Parcel Fabric", Qgis.MessageLevel.Warning)
 
 
 def update_record_footprint(fabric, record_gid, ed):

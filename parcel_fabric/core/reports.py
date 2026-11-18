@@ -62,8 +62,9 @@ def _course_cells(c):
         return ["(no COGO)", "", ""]
     if c.kind == CURVE:
         side = "R" if c.radius > 0 else "L"
-        curve = "R %.2f %s, Δ %s, chord %s %.2f" % (abs(c.radius), side, U.format_angle(math.degrees(c.delta)),
-                                                   U.azimuth_to_bearing(c.azimuth), c.chord_length)
+        curve = "R %.2f %s, Δ %s, chord %s %.2f" % (
+            abs(c.radius), side, U.format_angle(math.degrees(c.delta)),
+            U.azimuth_to_bearing(c.azimuth), c.chord_length)
         return ["Curve", "arc %.2f" % c.arc_length, curve]
     return [U.azimuth_to_bearing(c.azimuth), "%.2f" % c.distance, ""]
 

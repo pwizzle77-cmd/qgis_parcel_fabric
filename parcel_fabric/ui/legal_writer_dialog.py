@@ -272,7 +272,8 @@ class LegalWriterDialog(QDialog):
             return
         poly_area = abs(geom.area())
         sq, big = ("sq ft", 43560.0) if unit == "feet" else ("sq m", 10000.0)
-        msg = "Self-check: read back as %d courses; closes within %.3f %s%s. Describes %.3f %s; the polygon is %.3f %s." % (
+        msg = ("Self-check: read back as %d courses; closes within %.3f %s%s. "
+               "Describes %.3f %s; the polygon is %.3f %s.") % (
             len(courses), res.misclose, "ft" if unit == "feet" else "m",
             "" if res.misclose < 1e-6 else " (1:%s)" % "{:,}".format(int(res.ratio)),
             area / big, "ac" if unit == "feet" else "ha", poly_area / big, "ac" if unit == "feet" else "ha")

@@ -12,17 +12,26 @@ GeoPackage gets the same rules as SQLite triggers (useful when a GeoPackage
 sits on a shared drive).
 """
 
-
-
 ROLES = ("parcels", "lines", "points", "connections")    # schema.ROLE_* values
 MSG = "Parcel fabric: retired features are history and cannot be changed or deleted"
+
+
+def _dq(name):
+    """A safe double-quoted identifier body."""
+    return str(name).replace('"', '""')
+
+
+def _br(name):
+    """A safe [bracketed] identifier body (SQL Server)."""
+    return str(name).replace("]", "]]")
 
 
 def statements(provider, schema, tables):
     """SQL to install the rules for ``provider`` ('postgres', 'mssql', 'ogr'/'gpkg')."""
     out = []
     if provider == "postgres":
-        sch = schema or "public"
+        tables = [_dq(t) for t in tables]
+        sch = _dq(schema or "public")
         out.append('''CREATE OR REPLACE FUNCTION "%s".qpf_guard() RETURNS trigger AS $$
 BEGIN
   IF TG_OP = 'DELETE' THEN
@@ -32,16 +41,18 @@ BEGIN
     RAISE EXCEPTION '%s';
   END IF;
   RETURN NEW;
-END $$ LANGUAGE plpgsql''' % (sch, MSG, MSG))
+END $$ LANGUAGE plpgsql''' % (sch, MSG, MSG))  # nosec B608
         for t in tables:
-            out.append('DROP TRIGGER IF EXISTS qpf_guard ON "%s"."%s"' % (sch, t))
+            out.append('DROP TRIGGER IF EXISTS qpf_guard ON "%s"."%s"' % (sch, t))  # nosec B608
             out.append('CREATE TRIGGER qpf_guard BEFORE UPDATE OR DELETE ON "%s"."%s" '
-                       'FOR EACH ROW EXECUTE FUNCTION "%s".qpf_guard()' % (sch, t, sch))
+                       'FOR EACH ROW EXECUTE FUNCTION "%s".qpf_guard()' % (sch, t, sch))  # nosec B608
     elif provider == "mssql":
-        sch = schema or "dbo"
+        tables = [_br(t).replace("'", "''") for t in tables]
+        sch = _br(schema or "dbo").replace("'", "''")
         for t in tables:
             trg = "qpf_guard_%s" % t
-            out.append("IF OBJECT_ID('[%s].[%s]', 'TR') IS NOT NULL DROP TRIGGER [%s].[%s]" % (sch, trg, sch, trg))
+            out.append("IF OBJECT_ID('[%s].[%s]', 'TR') IS NOT NULL "  # nosec B608
+                       "DROP TRIGGER [%s].[%s]" % (sch, trg, sch, trg))
             out.append('''CREATE TRIGGER [%s].[%s] ON [%s].[%s] AFTER UPDATE, DELETE AS
 BEGIN
   SET NOCOUNT ON;
@@ -51,17 +62,18 @@ BEGIN
              WHERE d.[RetiredByRecord] IS NOT NULL
                AND (i.[RetiredByRecord] IS NULL OR i.[RetiredByRecord] <> d.[RetiredByRecord]))
   BEGIN ROLLBACK TRANSACTION; THROW 51000, '%s', 1; END
-END''' % (sch, trg, sch, t, MSG, MSG))
+END''' % (sch, trg, sch, t, MSG, MSG))  # nosec B608
     elif provider in ("ogr", "gpkg", "spatialite"):
+        tables = [_dq(t) for t in tables]
         for t in tables:
             out.append('DROP TRIGGER IF EXISTS "qpf_noretire_%s"' % t)
             out.append('''CREATE TRIGGER "qpf_noretire_%s" BEFORE UPDATE OF "RetiredByRecord" ON "%s"
 FOR EACH ROW WHEN OLD."RetiredByRecord" IS NOT NULL
   AND (NEW."RetiredByRecord" IS NULL OR NEW."RetiredByRecord" <> OLD."RetiredByRecord")
-BEGIN SELECT RAISE(ABORT, '%s'); END''' % (t, t, MSG))
+BEGIN SELECT RAISE(ABORT, '%s'); END''' % (t, t, MSG))  # nosec B608
             out.append('DROP TRIGGER IF EXISTS "qpf_nodelete_%s"' % t)
             out.append('''CREATE TRIGGER "qpf_nodelete_%s" BEFORE DELETE ON "%s"
-BEGIN SELECT RAISE(ABORT, '%s'); END''' % (t, t, MSG))
+BEGIN SELECT RAISE(ABORT, '%s'); END''' % (t, t, MSG))  # nosec B608
     else:
         raise ValueError("Safeguards aren't available for provider '%s'." % provider)
     return out
@@ -70,15 +82,18 @@ BEGIN SELECT RAISE(ABORT, '%s'); END''' % (t, t, MSG))
 def remove_statements(provider, schema, tables):
     out = []
     if provider == "postgres":
-        sch = schema or "public"
-        out += ['DROP TRIGGER IF EXISTS qpf_guard ON "%s"."%s"' % (sch, t) for t in tables]
+        tables = [_dq(t) for t in tables]
+        sch = _dq(schema or "public")
+        out += ['DROP TRIGGER IF EXISTS qpf_guard ON "%s"."%s"' % (sch, t) for t in tables]  # nosec B608
     elif provider == "mssql":
-        sch = schema or "dbo"
+        tables = [_br(t).replace("'", "''") for t in tables]
+        sch = _br(schema or "dbo").replace("'", "''")
         for t in tables:
             trg = "qpf_guard_%s" % t
-            out.append("IF OBJECT_ID('[%s].[%s]', 'TR') IS NOT NULL DROP TRIGGER [%s].[%s]" % (sch, trg, sch, trg))
+            out.append("IF OBJECT_ID('[%s].[%s]', 'TR') IS NOT NULL "  # nosec B608
+                       "DROP TRIGGER [%s].[%s]" % (sch, trg, sch, trg))
     else:
-        for t in tables:
+        for t in (_dq(t) for t in tables):
             out += ['DROP TRIGGER IF EXISTS "qpf_noretire_%s"' % t, 'DROP TRIGGER IF EXISTS "qpf_nodelete_%s"' % t]
     return out
 
@@ -87,17 +102,17 @@ def target(fabric):
     """(provider, connection source, schema, [table names]) of the fabric's layers."""
     from qgis.core import QgsDataSourceUri
     lyrs = [fabric.layers.get(r) for r in ROLES]
-    lyrs = [l for l in lyrs if l is not None]
+    lyrs = [lx for lx in lyrs if lx is not None]
     prov = lyrs[0].providerType()
     if prov == "ogr":
         path = lyrs[0].source().split("|")[0]
         tables = []
-        for l in lyrs:
-            parts = dict(p.split("=", 1) for p in l.source().split("|")[1:] if "=" in p)
-            tables.append(parts.get("layername", l.name()))
+        for lx in lyrs:
+            parts = dict(p.split("=", 1) for p in lx.source().split("|")[1:] if "=" in p)
+            tables.append(parts.get("layername", lx.name()))
         return prov, path, "", tables
     uri = QgsDataSourceUri(lyrs[0].source())
-    tables = [QgsDataSourceUri(l.source()).table() for l in lyrs]
+    tables = [QgsDataSourceUri(lx.source()).table() for lx in lyrs]
     return prov, lyrs[0].source(), uri.schema(), tables
 
 

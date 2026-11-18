@@ -1,5 +1,7 @@
-"""Copied from COGO Workbench (same author, GPL-2.0-or-later). Keep in sync by hand."""
-"""Planar COGO mathematics. No QGIS imports; azimuths run clockwise from north."""
+"""Planar COGO mathematics. No QGIS imports; azimuths run clockwise from north.
+
+Copied from COGO Workbench (same author, GPL-2.0-or-later). Keep in sync by hand.
+"""
 
 from dataclasses import dataclass
 import math

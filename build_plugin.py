@@ -24,7 +24,7 @@ target = root / "dist" / f"{NAME}-{version}.zip"
 target.parent.mkdir(exist_ok=True)
 with ZipFile(target, "w", ZIP_DEFLATED) as archive:
     for path in sorted(plugin.rglob("*")):
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix in (".py", ".txt", ".png", ".svg"):
+        if path.is_file() and "__pycache__" not in path.parts and (path.suffix in (".py", ".txt", ".png", ".svg") or path.name == ".flake8"):
             add(archive, path, f"{NAME}/{path.relative_to(plugin).as_posix()}")
     add(archive, root / "README.md", f"{NAME}/README.md")
     add(archive, root / "LICENSE", f"{NAME}/LICENSE")

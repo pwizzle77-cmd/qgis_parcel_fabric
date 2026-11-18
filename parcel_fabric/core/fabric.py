@@ -206,10 +206,10 @@ class Fabric:
         return self.connections if target == CONNECTIONS else self.lines
 
     def all_layers(self):
-        return [l for l in self.layers.values() if l is not None]
+        return [lx for lx in self.layers.values() if lx is not None]
 
     def edit_layers(self):
-        return [l for l in self.all_layers() if l.customProperty(PROP_ROLE) != S.ROLE_SETTINGS]
+        return [lx for lx in self.all_layers() if lx.customProperty(PROP_ROLE) != S.ROLE_SETTINGS]
 
     def save_settings(self, values):
         S.write_settings(self.layers[S.ROLE_SETTINGS], values)
@@ -510,17 +510,17 @@ class EditSession:
     """
 
     def __init__(self, layers, label="Parcel fabric edit"):
-        self.layers = [l for l in layers if l is not None]
+        self.layers = [lx for lx in layers if lx is not None]
         self.label = label
         self._started = []
 
     def __enter__(self):
-        for l in self.layers:
-            if not l.isEditable():
-                if not l.startEditing():
-                    raise RuntimeError("Layer %s can't be edited" % l.name())
-                self._started.append(l)
-            l.beginEditCommand(self.label)
+        for lx in self.layers:
+            if not lx.isEditable():
+                if not lx.startEditing():
+                    raise RuntimeError("Layer %s can't be edited" % lx.name())
+                self._started.append(lx)
+            lx.beginEditCommand(self.label)
         return self
 
     def add(self, layer, feature):
@@ -540,18 +540,18 @@ class EditSession:
 
     def __exit__(self, exc_type, exc, tb):
         if exc_type is not None:
-            for l in self.layers:
-                l.destroyEditCommand()
-            for l in self._started:
-                l.rollBack()
+            for lx in self.layers:
+                lx.destroyEditCommand()
+            for lx in self._started:
+                lx.rollBack()
             return False
-        for l in self.layers:
-            l.endEditCommand()
+        for lx in self.layers:
+            lx.endEditCommand()
         errors = []
-        for l in self._started:
-            if not l.commitChanges():
-                errors.append("%s: %s" % (l.name(), "; ".join(l.commitErrors())))
-                l.rollBack()
+        for lx in self._started:
+            if not lx.commitChanges():
+                errors.append("%s: %s" % (lx.name(), "; ".join(lx.commitErrors())))
+                lx.rollBack()
         if errors:
             raise RuntimeError("Save failed - " + " | ".join(errors))
         return False

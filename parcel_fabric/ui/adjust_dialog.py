@@ -164,8 +164,9 @@ class AdjustDialog(QDialog):
                 "Held point #%s still." % r.held if r.held is not None else
                 "%d fixed and %d weighted control point(s)." % (n_fixed, n_w)),
             "Standard error of unit weight %.2f (1.0 means the record fits as well as the accuracy you set)%s." % (
-                r.sigma0, "" if chi is None else ", chi-square test " + ("<span style='color:#1b5e20'>passes</span>"
-                                                                       if chi else "<span style='color:#b3261e'>fails</span>")),
+                r.sigma0, "" if chi is None else ", chi-square test " + (
+                    "<span style='color:#1b5e20'>passes</span>" if chi
+                    else "<span style='color:#b3261e'>fails</span>")),
             "%s%d line observation(s) disagree (normalized residual over 3)%s. Largest point move %.3f ft." % (
                 "<span style='color:#b3261e'>" if flagged else "", flagged, "</span>" if flagged else "",
                 max(moves) if moves else 0.0),

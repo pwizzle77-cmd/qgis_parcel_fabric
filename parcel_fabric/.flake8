@@ -1,0 +1,5 @@
+[flake8]
+max-line-length = 120
+# wb_legal.py holds long deed-wording regular expressions copied from COGO Workbench
+per-file-ignores =
+    core/wb_legal.py: E501

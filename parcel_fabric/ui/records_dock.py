@@ -237,6 +237,8 @@ class RecordsDock(QDockWidget):
         except Exception as e:
             QMessageBox.critical(self, "Edit Record", str(e))
             return
+        from ..core.build import _dates
+        _dates(fab, [gid])          # a changed recorded date moves the history
         self._fill()
         self._update_active()
 

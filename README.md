@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.3.0, experimental (Phases 1 and 2).** Test it on a copy of real data before
+**Status: 0.4.0, experimental (Phases 1 and 2, plus Parcel History).** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.3.0.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.4.0.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -88,6 +88,25 @@ features selected in **Parcels** (or **Parcel Lines**) and stay open for the nex
 Shared boundaries are never duplicated: there's no "copy lines to record" step,
 because neighbours keep using the same lines. Pro's Align Parcels isn't included;
 your Align Edge plugin covers that edit.
+
+## Parcel History (map timeline)
+
+Every parcel carries `QPF_StartDate` (the recorded date of the record that created
+it) and `QPF_EndDate` (the recorded date of the record that retired it). They are
+kept up to date after every build, split, divide, merge and record edit.
+
+- The **Parcel History** layer shows every parcel ever recorded, current and
+  retired, and is time-enabled: QGIS's **Temporal Controller** shows the parcel map
+  as it stood on any date, and can export an animation.
+- The **Parcel History** window: pick a parcel (current or retired, or type its
+  number). It finds the original parcel(s) and every split, divide and merge that
+  came from them, colours the family by generation, and lists each step with its
+  date and record. Click a step, drag the slider or press **Play** to watch the
+  parcel change on the map. **Today** shows the present.
+- **History Handout** writes a printable page: for every step, the record (book,
+  page, document link), what became what with acreages, and a map of that date.
+- Check Fabric warns about records with no recorded date, because history can't
+  place them in time.
 
 ## Tables
 

@@ -124,7 +124,10 @@ PARCEL_FIELDS = [
     ("MiscloseRatio", DBL, 0, "Misclose ratio"),
     ("MiscloseDistance", DBL, 0, "Misclose distance"),
     ("IsSeed", INT, 0, "Is seed"),
-] + _COMMON_TAIL
+] + _COMMON_TAIL + [
+    ("QPF_StartDate", DATE, 0, "Start date (from its record)"),
+    ("QPF_EndDate", DATE, 0, "End date (from the retiring record)"),
+]
 
 LINEAGE_FIELDS = [
     ("GlobalID", STR, GUID_LEN, "Global ID"),

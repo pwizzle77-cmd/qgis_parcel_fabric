@@ -248,6 +248,35 @@ class Phase2Tests(_Base):
         merges = [r for r in self.fab.lineage.getFeatures() if r["Operation"] == "Merge"]
         self.assertEqual(len(merges), 2)
 
+    def test_history_dates_and_family(self):
+        from qgis.core import QgsGeometry, QgsPointXY
+        from qgis.PyQt.QtCore import QDate
+        from parcel_fabric.core import edits as E
+        from parcel_fabric.core import family as F
+        from parcel_fabric.core import history as H
+        from parcel_fabric.core import lineage as L
+        self.fab.update_record(self.rec, date=QDate(1998, 4, 2))
+        self.fab.update_record(self.rec2, date=QDate(2010, 7, 15))
+        cut = QgsGeometry.fromPolylineXY([QgsPointXY(X0 + 80, Y0 - 20), QgsPointXY(X0 + 80, Y0 + 120)])
+        E.cut_parcel(self.fab, self.parent, [cut], self.rec2)
+        H.refresh_dates(self.fab)
+        hist = H.history_layer(self.fab)
+        self.assertTrue(hist.temporalProperties().isActive())
+        allp = {f["GlobalID"]: f for f in hist.getFeatures()}
+        self.assertEqual(len(allp), 3)                       # parent + 2 children
+        par = allp[self.parent["GlobalID"]]
+        self.assertEqual(par["QPF_StartDate"], QDate(1998, 4, 2))
+        self.assertEqual(par["QPF_EndDate"], QDate(2010, 7, 15))
+        kids = [f for g, f in allp.items() if g != self.parent["GlobalID"]]
+        self.assertTrue(all(k["QPF_StartDate"] == QDate(2010, 7, 15) and not k["QPF_EndDate"] for k in kids))
+        # family from one child goes back to the parent and over to its sibling
+        up = L.walk(self.fab, kids[0]["GlobalID"], up=True)
+        roots = F.roots(up, kids[0]["GlobalID"])
+        self.assertEqual(roots, {self.parent["GlobalID"]})
+        down = L.walk(self.fab, self.parent["GlobalID"], up=False)
+        self.assertEqual(F.descendants(down, roots), set(allp))
+        self.assertEqual(H.undated_records(self.fab), [])
+
     def test_copy_parallel(self):
         from parcel_fabric.core import edits as E
         south = [f for f in self.fab.lines.getFeatures()

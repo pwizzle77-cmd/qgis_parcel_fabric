@@ -189,6 +189,9 @@ class NumbersDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Assign Parcel Numbers", str(e))
             return
+        if retire_parent is not None:
+            from ..core.build import _dates
+            _dates(self.fabric, [rec])
         n = len(self._planned)
         msg = "Numbered %d parcel(s)." % n
         if retire_parent is not None:

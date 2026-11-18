@@ -295,7 +295,17 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
             ed.add(fabric.points, p)
         if record_gid:
             update_record_footprint(fabric, record_gid, ed)
+    _dates(fabric, [record_gid, new_record])
     return rep
+
+
+def _dates(fabric, records):
+    """Keep history dates current; never let this break an edit."""
+    try:
+        from .history import refresh_dates
+        refresh_dates(fabric, [r for r in records if r])
+    except Exception:
+        pass
 
 
 def update_record_footprint(fabric, record_gid, ed):

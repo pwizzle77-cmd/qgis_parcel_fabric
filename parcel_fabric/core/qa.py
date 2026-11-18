@@ -17,6 +17,7 @@ CHECKS = [
     ("no_record", "Features that don't belong to any record"),
     ("no_type", "Parcels or parcel lines with no (or an unknown) parcel type"),
     ("numbers", "Parcels without a number, or with a number used twice"),
+    ("record_dates", "Records with parcels but no recorded date (Parcel History can't place them)"),
 ]
 
 
@@ -134,6 +135,14 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                                         p.x(), p.y(), lyr.id(), f.id()))
                 else:
                     seen_numbers[num] = f.id()
+    if "record_dates" in checks:
+        from .history import undated_records
+        for gid in undated_records(fabric):
+            rec = fabric.record_by_id(gid)
+            name = (rec["Name"] if rec is not None else None) or gid
+            issues.append(Issue("warning", "Record %s has no recorded date - Parcel History can't "
+                                "place its parcels in time" % name,
+                                layer_id=fabric.records.id(), fid=rec.id() if rec is not None else None))
     return issues
 
 

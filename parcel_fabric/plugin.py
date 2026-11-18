@@ -58,6 +58,8 @@ class ParcelFabricPlugin:
                   "Offset copies of fabric lines (easements, right of way)")
         self._add("lineage", "Parcel Lineage", lambda: self._window("lineage"),
                   "Where a parcel came from and what it became")
+        self._add("history", "Parcel History", lambda: self._window("history"),
+                  "A parcel's splits and merges on the map, step by step through time")
         self.toolbar.addSeparator()
         self._add("numbers", "Assign Parcel Numbers", self.assign_numbers,
                   "Number the selected parcels (new parcels or splits of a parent)")
@@ -215,9 +217,11 @@ class ParcelFabricPlugin:
         except RuntimeError:          # deleted on close
             pass
         from .ui import edit_dialogs as ED
+        from .ui.history_dialog import HistoryDialog
         from .ui.lineage_dialog import LineageDialog
         cls = {"split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
-               "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog}[kind]
+               "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
+               "history": HistoryDialog}[kind]
         w = cls(self.iface, self.manager)
         w.show()
         self._windows[kind] = w

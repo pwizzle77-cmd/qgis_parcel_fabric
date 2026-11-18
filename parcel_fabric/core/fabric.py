@@ -108,8 +108,8 @@ class Fabric:
             if not isinstance(lyr, QgsVectorLayer):
                 continue
             fid = lyr.customProperty(PROP_FABRIC)
-            if not fid:
-                continue
+            if not fid or lyr.customProperty(PROP_ROLE) == "history":
+                continue        # the history layer is a view, not a fabric table
             found.setdefault(fid, {})[lyr.customProperty(PROP_ROLE)] = lyr
         out = []
         need = {S.ROLE_SETTINGS, S.ROLE_RECORDS, S.ROLE_POINTS, S.ROLE_CONNECTIONS,

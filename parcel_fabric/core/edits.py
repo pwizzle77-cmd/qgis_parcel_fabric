@@ -29,7 +29,7 @@ from . import geomops as G
 from . import lineage as L
 from . import schema as S
 from . import units as U
-from .build import _single_curve, build_parcels, update_record_footprint
+from .build import _dates, _single_curve, build_parcels, update_record_footprint
 from .fabric import CURRENT, EditSession, quote, type_expr
 
 
@@ -332,6 +332,7 @@ def cut_parcel(fabric, parent, cut_geoms, record, operation="Split", remainder_k
     _number_children(fabric, parent, kids, res)
     parent = fabric.parcels.getFeature(parent.id()) if remainder_keeps else parent
     L.add(fabric, record, operation, [parent], _by_gid(fabric, rep.new_ids))
+    _dates(fabric, [record])
     return res
 
 
@@ -493,6 +494,7 @@ def merge_parcels(fabric, parents, record, keep_number=None):
     kid = fabric.parcels.getFeature(kid.id())
     res.children = [kid["ParcelNumber"] or kid["Name"] or "#%d" % kid.id()]
     L.add(fabric, record, "Merge", parents, [kid])
+    _dates(fabric, [record])
     return res
 
 

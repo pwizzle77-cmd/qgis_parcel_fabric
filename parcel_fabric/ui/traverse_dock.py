@@ -94,7 +94,8 @@ class TraverseDock(QDockWidget):
         for text, slot in [("Add line", lambda: self._add_row("Line")),
                            ("Add curve", lambda: self._add_row("Curve")),
                            ("Delete", self._delete_rows), ("Clear", self._clear),
-                           ("Paste description...", self._paste)]:
+                           ("Paste description...", self._paste),
+                           ("Read Deed (AI)...", self._read_deed)]:
             b = QPushButton(text)
             b.clicked.connect(slot)
             rowb.addWidget(b)
@@ -405,8 +406,22 @@ class TraverseDock(QDockWidget):
         dlg = LegalDialog(fab.foot_m, self)
         if not dlg.exec() or not dlg.courses:
             return
+        self.load_courses(dlg.courses)
+
+    def _read_deed(self):
+        fab = self.manager.active
+        if fab is None:
+            return
+        from .deed_reader_dialog import DeedReaderDialog
+        dlg = DeedReaderDialog(self.iface, self.manager, self)
+        if dlg.exec() and dlg.courses:
+            self.load_courses(dlg.courses)
+            self.dimsrc.setCurrentText("Record")
+
+    def load_courses(self, courses):
+        """Replace the grid with these courses (from a description or a deed)."""
         self.table.setRowCount(0)
-        for c in dlg.courses:
+        for c in courses:
             if c.is_curve:
                 self._add_row("Curve", {
                     "bearing": U.azimuth_to_bearing(c.azimuth, 2),

@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.5.0, experimental.** Test it on a copy of real data before
+**Status: 0.6.0, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.5.0.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.6.0.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -127,6 +127,27 @@ kept up to date after every build, split, divide, merge and record edit.
   before you create anything.
 - **Records > Closure Report** – every course, misclose, precision and area (record
   vs. coordinates vs. stated) for a record's parcels, as a printable page.
+
+## Read Deed (AI) – optional, uses a local Ollama
+
+**Traverse > Read Deed (AI)...** turns a deed file into Traverse courses:
+
+1. **Read Document** – a text PDF is read directly; scanned PDFs and images (PNG, JPG,
+   TIF, multi-page TIF) are turned into page images and transcribed by a vision model
+   running in [Ollama](https://ollama.com) on your own computer (default
+   `deepseek-ocr`; `qwen2.5vl` and `gemma4` also work). Nothing is sent anywhere else.
+   The text is editable so you can fix misread characters.
+2. **Find Description** – picks out the legal description (from "Commence/Begin at"
+   to the last "Point of Beginning"); **Ask AI to Find It** is the fallback.
+3. **Extract Calls** – COGO Workbench's parser reads the calls first. **Ask AI About
+   Unread Calls** sends only the clauses it couldn't read to the model, which must
+   quote the deed; an answer is rejected if its quote isn't in the deed or its numbers
+   aren't in the quote. AI-read calls are shown in orange.
+4. Closure and area show as you go. Nothing loads into Traverse until you tick "I
+   checked every call against the deed". The deed can be attached to the active record.
+
+PDF pages are rendered with Qt's PDF module, GDAL's PDF driver, or Poppler's
+`pdftoppm`, whichever this QGIS has.
 
 ## Tables
 

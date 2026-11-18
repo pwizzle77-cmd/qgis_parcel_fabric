@@ -130,10 +130,46 @@ class SettingsDialog(QDialog):
         tabs.addTab(n, "Parcel numbers")
         self._select_plss()
 
+        mu = QWidget()
+        ml = QVBoxLayout(mu)
+        txt = QLabel(
+            "<b>Shared fabrics</b><br>When several people edit the same fabric, install database rules "
+            "so that a parcel retired by one editor can't be retired (split, merged) again by another, "
+            "and no fabric feature can be deleted - history is retired, never removed. The rules live "
+            "in the database (PostgreSQL, SQL Server or GeoPackage triggers), so they hold for QGIS, "
+            "ArcGIS and scripts alike.<br><br>Splits and merges also re-read the parcel from the "
+            "database before retiring it.")
+        txt.setWordWrap(True)
+        ml.addWidget(txt)
+        mrow = QHBoxLayout()
+        inst = QPushButton("Install Rules")
+        rem = QPushButton("Remove Rules")
+        inst.clicked.connect(lambda: self._safeguards(True))
+        rem.clicked.connect(lambda: self._safeguards(False))
+        mrow.addWidget(inst)
+        mrow.addWidget(rem)
+        mrow.addStretch(1)
+        ml.addLayout(mrow)
+        ml.addStretch(1)
+        tabs.addTab(mu, "Multi-user")
+
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
+
+    # ------------------------------------------------------------------
+    def _safeguards(self, install):
+        from ..core import safeguards
+        try:
+            n = safeguards.run(self.fabric, install)
+        except Exception as e:
+            QMessageBox.critical(self, "Multi-user rules", "Couldn't %s the rules: %s\n\n"
+                                 "Your database login needs permission to create triggers."
+                                 % ("install" if install else "remove", e))
+            return
+        QMessageBox.information(self, "Multi-user rules", "Rules %s (%d statements)." %
+                                ("installed" if install else "removed", n))
 
     # ------------------------------------------------------------------
     def _browse_root(self):

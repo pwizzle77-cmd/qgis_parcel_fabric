@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from qgis.core import QgsApplication, QgsFeatureRequest, QgsGeometry, QgsProject, QgsRectangle  # noqa: E402
+from qgis.core import QgsApplication, QgsFeature, QgsFeatureRequest, QgsGeometry, QgsProject, QgsRectangle  # noqa: E402
 
 APP = QgsApplication.instance() or QgsApplication([], False)
 APP.initQgis()
@@ -375,6 +375,90 @@ class Release05Tests(_Base):
             html = fh.read()
         self.assertIn("closed", html)
         self.assertIn("0.459", html)
+
+
+class Release08Tests(_Base):
+    """Subdivide by lot width, retire guard, LandXML, safeguards, Pro import, DXF."""
+
+    def setUp(self):
+        super().setUp()
+        self.traverse("Tax", courses(("N 0 E", 100), ("N 90 E", 200), ("S 0 E", 100), ("S 90 W", 200)))
+        build_parcels(self.fab, "Tax", self.rec)
+        self.parent = next(self.fab.parcels.getFeatures())
+        self.rec2 = self.fab.create_record("PB 2 PG 1", "Plat")
+        Fabric.set_active_record_id(self.rec2)
+
+    def current(self):
+        return list(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+
+    def test_lots_by_width(self):
+        from parcel_fabric.core import edits as E
+        cuts = E.divide_cuts(self.parent.geometry(), U.parse_bearing("N 0 E"), "width", area=60)
+        self.assertEqual(len(cuts), 3)
+        E.cut_parcel(self.fab, self.parent, cuts, self.rec2, "Subdivide")
+        self.assertEqual(sorted(round(f.geometry().area()) for f in self.current()), [2000, 6000, 6000, 6000])
+
+    def test_cannot_retire_twice(self):
+        from parcel_fabric.core import edits as E
+        cuts = E.divide_cuts(self.parent.geometry(), U.parse_bearing("N 0 E"), "equal_area", 2)
+        stale = QgsFeature(self.parent)          # another editor's copy, read before the split
+        E.cut_parcel(self.fab, self.parent, cuts, self.rec2, "Divide")
+        with self.assertRaises(E.EditError):
+            E.cut_parcel(self.fab, stale, cuts, self.rec2, "Divide")
+
+    def test_gpkg_safeguards(self):
+        from parcel_fabric.core import safeguards as G
+        self.assertGreater(G.run(self.fab, True), 0)
+        self.fab.parcels.reload()
+        f = next(self.fab.parcels.getFeatures())
+        ok = self.fab.parcels.dataProvider().deleteFeatures([f.id()])
+        self.assertFalse(ok)
+        G.run(self.fab, False)
+
+    def test_landxml_import(self):
+        from parcel_fabric.core import exchange as XC
+        x0, y0 = X0 + 1000, Y0
+        xml = os.path.join(self.tmp, "lots.xml")
+        with open(xml, "w") as fh:
+            fh.write("""<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2"><Parcels>
+<Parcel name="Lot 1" area="10000"><CoordGeom>
+<Line><Start>{y0} {x0}</Start><End>{y1} {x0}</End></Line>
+<Line><Start>{y1} {x0}</Start><End>{y1} {xm}</End></Line>
+<Line><Start>{y1} {xm}</Start><End>{y0} {xm}</End></Line>
+<Line><Start>{y0} {xm}</Start><End>{y0} {x0}</End></Line></CoordGeom></Parcel>
+<Parcel name="Lot 2"><CoordGeom>
+<Line><Start>{y0} {xm}</Start><End>{y1} {xm}</End></Line>
+<Line><Start>{y1} {xm}</Start><End>{y1} {x1}</End></Line>
+<Line><Start>{y1} {x1}</Start><End>{y0} {x1}</End></Line>
+<Line><Start>{y0} {x1}</Start><End>{y0} {xm}</End></Line></CoordGeom></Parcel>
+</Parcels></LandXML>""".format(x0=x0, xm=x0 + 100, x1=x0 + 200, y0=y0, y1=y0 + 100))
+        nl, npt, rep, named = XC.import_landxml(self.fab, xml, "Lot", self.rec2)
+        self.assertEqual(nl, 7)          # the shared line once
+        self.assertEqual(rep.created, 2)
+        self.assertEqual(named, 2)
+        names = sorted(f["Name"] for f in self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression("\"ParcelType\" = 'Lot'")))
+        self.assertEqual(names, ["Lot 1", "Lot 2"])
+
+    def test_pro_import_and_dxf(self):
+        from parcel_fabric.core import exchange as XC
+        # pretend this fabric is a Pro export: copy its tables into a "Pro" GeoPackage
+        from osgeo import gdal
+        pro = os.path.join(self.tmp, "pro.gpkg")
+        gdal.VectorTranslate(pro, self.path, layers=["Records", "Points", "Connections"])
+        gdal.VectorTranslate(pro, self.path, accessMode="append", layers=["Parcels"], layerName="Tax")
+        gdal.VectorTranslate(pro, self.path, accessMode="append", layers=["Parcel_Lines"], layerName="Tax_Lines")
+        t = XC.detect_fabric(XC.source_layers(pro))
+        self.assertEqual(t["records"], "Records")
+        self.assertIn("Tax", t["types"])
+        path2 = os.path.join(self.tmp, "new.gpkg")
+        S.create_fabric("ogr", path2, "", "", ["Tax"], "EPSG:2238", {"name": "Imported"})
+        fab2 = Fabric.open("ogr", path2)
+        XC.import_pro(fab2, pro, t)
+        self.assertEqual(fab2.parcels.featureCount(), self.fab.parcels.featureCount())
+        self.assertEqual(fab2.lines.featureCount(), self.fab.lines.featureCount())
+        out = XC.export_dxf(self.fab, os.path.join(self.tmp, "fabric.dxf"))
+        self.assertGreater(os.path.getsize(out), 1000)
 
 
 if __name__ == "__main__":

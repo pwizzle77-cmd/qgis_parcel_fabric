@@ -67,11 +67,17 @@ class ParcelFabricPlugin:
                   "Area difference, offsets and slivers between fabric parcels and an existing parcel layer")
         self._add("adjust", "Least-Squares Adjustment", lambda: self._window("adjust"),
                   "Consistency check of record dimensions, or a weighted adjustment to control")
+        self._add("subdivide", "Subdivide Block", lambda: self._window("subdivide"),
+                  "Lay out lots along a street frontage with zoning checks")
+        self._add("address", "Address Lots (NENA)", lambda: self._window("address"),
+                  "House numbers for new lots from the NENA Addressing and RCL Tools plugin")
         self.toolbar.addSeparator()
         self._add("numbers", "Assign Parcel Numbers", self.assign_numbers,
                   "Number the selected parcels (new parcels or splits of a parent)")
         self._add("check", "Check Fabric", self.check_fabric,
                   "Find open loops, missing COGO, bad misclose and other problems")
+        self._add("exchange", "Import / Export...", lambda: self._window("exchange"),
+                  "Import an ArcGIS Pro fabric or LandXML; export DXF")
         self.toolbar.addSeparator()
         self._add("settings", "Fabric Settings...", self.fabric_settings,
                   "Parcel types, document folder and naming, parcel numbering, tolerances")
@@ -228,8 +234,11 @@ class ParcelFabricPlugin:
         from .ui.compare_dialog import CompareDialog
         from .ui.history_dialog import HistoryDialog
         from .ui.legal_writer_dialog import LegalWriterDialog
+        from .ui.address_lots_dialog import AddressLotsDialog
+        from .ui.exchange_dialog import ExchangeDialog
         from .ui.lineage_dialog import LineageDialog
-        cls = {"split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
+        cls = {"subdivide": ED.SubdivideWindow, "address": AddressLotsDialog, "exchange": ExchangeDialog,
+               "split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
                "history": HistoryDialog, "legal_writer": LegalWriterDialog,
                "compare": CompareDialog, "adjust": AdjustDialog}[kind]

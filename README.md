@@ -169,6 +169,45 @@ PDF pages are rendered with Qt's PDF module, GDAL's PDF driver, or Poppler's
 The solver is built in (numpy). DynAdjust isn't wired in yet; very large networks
 (thousands of points) may be slow.
 
+## Subdivision, addressing and data exchange (0.8.0)
+
+**Subdivide Block** lays out lots on one selected block parcel:
+
+- **Frontage runs** – type the street bearing or **Pick Frontage Line**; lot lines run
+  square to it.
+- **Lots N ft wide** (the leftover is the last lot) or **N lots of equal frontage**;
+  **Lots on both sides** splits the block front-to-back first (double-loaded block);
+  **Start from the other end** flips where the first lot starts.
+- **Zoning** – minimum area and frontage; Preview lists every lot's acres and frontage
+  and flags the ones that fail. Apply cuts the block under the active record
+  (operation "Subdivide"), with lineage, like Divide.
+
+**Address Lots (NENA)** asks the *NENA Addressing and RCL Tools* plugin for each selected
+lot's house number (its own ranging, parity and spacing; nearest centerline, a point
+inside the lot as the rooftop). Review and untick or edit numbers, then **Write
+Addresses** adds them to the NENA address layer's edits for you to save. Needs that
+plugin installed with its centerline and address layers chosen; otherwise the window
+says so.
+
+**Import / Export...**
+
+- **ArcGIS Pro fabric** – a File Geodatabase or GeoPackage export of a Pro fabric
+  (`Records`, `Points`, `Connections`, `<Type>` and `<Type>_Lines`). Values copy by
+  field name (GlobalIDs and record links kept); each Pro type lands in `Parcels` /
+  `Parcel_Lines` with its `ParcelType` (rename it in the table first if you like); Z/M
+  dropped; reprojected to the fabric's CRS. Import into an empty fabric.
+- **LandXML** – Parcels from Civil 3D, Carlson, TBC... Shared lines added once, built
+  under the active record, LandXML names and areas carried over. Coordinates must be in
+  the fabric's CRS.
+- **DXF export** – current lines, connections, points and parcels with symbols and labels,
+  whole fabric or the current view.
+
+**Shared fabrics.** Fabric Settings → **Multi-user** installs database rules (PostgreSQL,
+SQL Server or GeoPackage triggers): once a feature is retired its `RetiredByRecord` can't
+change, and fabric features can't be deleted. Split, Divide, Merge and Subdivide also
+re-read the parcel from the database before retiring it, so two editors can't split the
+same parcel. Installing triggers needs a login that may create them.
+
 ## Tables
 
 | Table | Geometry | Notes |
@@ -199,8 +238,9 @@ QGIS integration tests (Windows example):
 
 ## Roadmap
 
-Phase 4:
-multi-user editing, history, subdivision layout, reports, imports.
+Before 1.0: verify field names and coded values against a real Pro export, export *to*
+Pro (split on `ParcelType`), DynAdjust for very large adjustments, and branch versioning
+style edit sessions for PostgreSQL.
 
 ## License
 

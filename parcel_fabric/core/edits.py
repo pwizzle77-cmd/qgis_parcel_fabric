@@ -118,6 +118,15 @@ def _copy_attrs(src, lyr):
     return f
 
 
+def still_current(layer, fid):
+    """Re-read a feature from the database (not this session's copy): has
+    another editor retired it meanwhile?"""
+    req = QgsFeatureRequest().setFilterFid(fid)
+    for f in layer.dataProvider().getFeatures(req):
+        return not f["RetiredByRecord"]
+    return False
+
+
 def _require_record(record):
     if not record:
         raise EditError("Set an active record first - edits belong to the record that makes them.")
@@ -291,8 +300,8 @@ def cut_parcel(fabric, parent, cut_geoms, record, operation="Split", remainder_k
     (QgsGeometry point) picks a different piece to keep.
     """
     _require_record(record)
-    if parent["RetiredByRecord"]:
-        raise EditError("That parcel is already retired.")
+    if parent["RetiredByRecord"] or not still_current(fabric.parcels, parent.id()):
+        raise EditError("That parcel is already retired (another editor may have just retired it).")
     ptype = parent["ParcelType"]
     if ptype not in fabric.parcel_types:
         raise EditError("The parcel has no known parcel type.")
@@ -369,8 +378,9 @@ def _number_children(fabric, parent, kids, res):
 def divide_cuts(parcel_geom, azimuth, mode="equal_area", count=2, area=None, flip=False):
     """Cut lines that divide a parcel with lines parallel to ``azimuth``.
 
-    ``mode``: "equal_area" (``count`` parts), "equal_width" (``count`` parts)
-    or "area" (pieces of ``area`` sq ft each, the rest is the remainder).
+    ``mode``: "equal_area" (``count`` parts), "equal_width" (``count`` parts),
+    "area" (pieces of ``area`` sq ft each, the rest is the remainder) or
+    "width" (lots ``area`` feet wide, measured across the cut lines).
     ``flip`` measures from the other side.  Returns QgsGeometry lines.
     """
     seg = _seg(parcel_geom)
@@ -403,6 +413,16 @@ def divide_cuts(parcel_geom, azimuth, mode="equal_area", count=2, area=None, fli
 
     if mode == "equal_width":
         xs = [x0 + (x1 - x0) * k / count for k in range(1, count)]
+    elif mode == "width":
+        # lots of a set frontage ``area`` (here: the width in map units) from the start side
+        if not area or area <= 0:
+            raise EditError("Enter the lot width.")
+        n = int((x1 - x0) // area)
+        if abs((x1 - x0) - n * area) < 1e-6:
+            n -= 1
+        if n < 1:
+            raise EditError("The block is narrower than one lot.")
+        xs = [x0 + area * k for k in range(1, n + 1)]
     elif mode == "area":
         if not area or area <= 0:
             raise EditError("Enter the area of each piece.")
@@ -441,8 +461,8 @@ def merge_parcels(fabric, parents, record, keep_number=None):
     types = {p["ParcelType"] for p in parents}
     if len(types) != 1:
         raise EditError("Only parcels of one parcel type can be merged.")
-    if any(p["RetiredByRecord"] for p in parents):
-        raise EditError("A selected parcel is already retired.")
+    if any(p["RetiredByRecord"] or not still_current(fabric.parcels, p.id()) for p in parents):
+        raise EditError("A selected parcel is already retired (another editor may have just retired it).")
     ptype = types.pop()
     tol = fabric.tolerance
     union = QgsGeometry.unaryUnion([_seg(p.geometry()).buffer(tol / 2, 2) for p in parents]).buffer(-tol / 2, 2)

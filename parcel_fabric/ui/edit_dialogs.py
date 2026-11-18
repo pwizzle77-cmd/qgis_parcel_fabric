@@ -436,3 +436,155 @@ class CopyParallelWindow(_EditWindow):
     def apply(self, fab, record):
         return E.copy_parallel(fab, self.selected(), self._distance(fab), self.side.currentData(),
                                self.target.currentText(), record)
+
+
+# --------------------------------------------------------------------------
+class SubdivideWindow(_EditWindow):
+    TITLE = "Subdivide Block"
+    HELP = "Select ONE block parcel, pick its street frontage line, set the lots, Preview, then Apply."
+
+    def __init__(self, iface, manager, parent=None):
+        super().__init__(iface, manager, parent)
+        self.cuts, self.pieces = [], []
+        form = QFormLayout()
+        frow = QHBoxLayout()
+        self.frontage = QLineEdit("N 90-00-00 E")
+        self.frontage.setToolTip("Bearing of the street frontage; lot lines run square to it")
+        pick = QPushButton("Pick Frontage Line")
+        self.pick_tool = PickLineTool(self.canvas, lambda: self.manager.active)
+        self.pick_tool.picked.connect(self._picked)
+        pick.clicked.connect(lambda: self.canvas.setMapTool(self.pick_tool))
+        frow.addWidget(self.frontage, 1)
+        frow.addWidget(pick)
+        form.addRow("Frontage runs", frow)
+        lrow = QHBoxLayout()
+        self.by_width = QRadioButton("Lots")
+        self.by_count = QRadioButton("or")
+        g = QButtonGroup(self)
+        g.addButton(self.by_width)
+        g.addButton(self.by_count)
+        self.by_width.setChecked(True)
+        self.width = QLineEdit("100")
+        self.width.setToolTip("Frontage of each lot (feet); the rest is the remainder lot")
+        self.count = QSpinBox()
+        self.count.setRange(2, 500)
+        self.count.setValue(4)
+        lrow.addWidget(self.by_width)
+        lrow.addWidget(self.width)
+        lrow.addWidget(QLabel("ft wide"))
+        lrow.addWidget(self.by_count)
+        lrow.addWidget(self.count)
+        lrow.addWidget(QLabel("lots of equal frontage"))
+        lrow.addStretch(1)
+        form.addRow("Lots", lrow)
+        self.double = QCheckBox("Lots on both sides (split the block front-to-back first)")
+        self.flip = QCheckBox("Start from the other end")
+        form.addRow("", self.double)
+        form.addRow("", self.flip)
+        zrow = QHBoxLayout()
+        self.min_area = QLineEdit("")
+        self.min_area.setPlaceholderText("e.g. 0.5")
+        self.min_unit = QComboBox()
+        self.min_unit.addItem("acres", 43560.0)
+        self.min_unit.addItem("sq ft", 1.0)
+        self.min_front = QLineEdit("")
+        self.min_front.setPlaceholderText("e.g. 75")
+        zrow.addWidget(QLabel("Min area"))
+        zrow.addWidget(self.min_area)
+        zrow.addWidget(self.min_unit)
+        zrow.addWidget(QLabel("Min frontage (ft)"))
+        zrow.addWidget(self.min_front)
+        form.addRow("Zoning", zrow)
+        self.lay.addLayout(form)
+        prev = QPushButton("Preview")
+        prev.clicked.connect(self._preview)
+        self.lay.addWidget(prev)
+        self.prev_lbl = QLabel()
+        self.prev_lbl.setWordWrap(True)
+        self.prev_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self.lay.addWidget(self.prev_lbl)
+        self._finish_ui()
+
+    def _picked(self, f):
+        try:
+            az = math.radians(float(f["Direction"]))
+        except (TypeError, ValueError):
+            g = f.geometry().constGet()
+            s, e = g.startPoint(), g.endPoint()
+            az, _ = U.inverse(s.x(), s.y(), e.x(), e.y())
+        self.frontage.setText(U.azimuth_to_bearing(az))
+        self.iface.actionPan().trigger()
+
+    def _num(self, w):
+        t = w.text().replace(",", "").strip()
+        return float(t) if t else None
+
+    def _compute(self):
+        fab = self.manager.active
+        sel = self.selected()
+        if len(sel) != 1:
+            raise E.EditError("Select exactly one block parcel.")
+        try:
+            front = U.parse_bearing(self.frontage.text(), fab.packed_dms)
+        except U.ParseError as e:
+            raise E.EditError(str(e))
+        geom = sel[0].geometry()
+        lot_az = (front + math.pi / 2) % (2 * math.pi)      # lot lines run square to the street
+        cuts = []
+        halves = [geom]
+        if self.double.isChecked():
+            mid = E.divide_cuts(geom, front, "equal_area", 2)
+            cuts += mid
+            inside = E.clip_cuts(fab, geom, mid)
+            halves = E._pieces(geom, inside)
+        for h in halves:
+            try:
+                if self.by_width.isChecked():
+                    w = self._num(self.width)
+                    cuts += E.divide_cuts(h, lot_az, "width", area=w, flip=self.flip.isChecked())
+                else:
+                    cuts += E.divide_cuts(h, lot_az, "equal_width", self.count.value(), flip=self.flip.isChecked())
+            except ValueError as e:
+                raise E.EditError(str(e))
+        return sel[0], cuts, front
+
+    def _preview(self):
+        fab = self.manager.active
+        try:
+            parent, cuts, front = self._compute()
+            inside = E.clip_cuts(fab, parent.geometry(), cuts)
+            pieces = E._pieces(parent.geometry(), inside)
+        except (E.EditError, ValueError) as e:
+            QMessageBox.warning(self, self.TITLE, str(e))
+            return
+        self.cuts = cuts
+        self.show_line([QgsGeometry.fromPolylineXY([QgsPointXY(*p) for p in c]) for c in inside])
+        min_a = (self._num(self.min_area) or 0) * self.min_unit.currentData()
+        min_f = self._num(self.min_front) or 0
+        rows, bad = [], 0
+        for i, g in enumerate(sorted(pieces, key=lambda g: (-round(g.centroid().asPoint().y(), 1),
+                                                            round(g.centroid().asPoint().x(), 1))), 1):
+            r = QgsGeometry(g)
+            r.rotate(-math.degrees(front) + 90, g.centroid().asPoint())   # frontage now runs east-west
+            width = r.boundingBox().width()
+            fails = []
+            if min_a and g.area() < min_a:
+                fails.append("area")
+            if min_f and width < min_f - 0.005:
+                fails.append("frontage")
+            bad += bool(fails)
+            rows.append("<tr><td>%d</td><td>%.3f</td><td>%.1f</td><td style='color:%s'>%s</td></tr>" % (
+                i, g.area() / 43560.0, width, "#b3261e" if fails else "#1b5e20",
+                ("too small: " + ", ".join(fails)) if fails else "ok"))
+        self.prev_lbl.setText("<b>%d lots</b>%s<table><tr><th>Lot</th><th>Acres</th><th>Frontage ft</th>"
+                              "<th>Zoning</th></tr>%s</table>" % (
+                                  len(pieces), " - <span style='color:#b3261e'>%d fail zoning</span>" % bad
+                                  if bad else "", "".join(rows)))
+
+    def apply(self, fab, record):
+        parent, cuts, _front = self._compute()
+        return E.cut_parcel(fab, parent, cuts, record, "Subdivide")
+
+    def release_tools(self):
+        if self.canvas.mapTool() is self.pick_tool:
+            self.canvas.unsetMapTool(self.pick_tool)

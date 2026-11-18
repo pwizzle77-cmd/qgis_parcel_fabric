@@ -12,7 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from qgis.core import QgsApplication, QgsFeatureRequest, QgsProject, QgsRectangle  # noqa: E402
+from qgis.core import QgsApplication, QgsFeatureRequest, QgsGeometry, QgsProject, QgsRectangle  # noqa: E402
 
 APP = QgsApplication.instance() or QgsApplication([], False)
 APP.initQgis()
@@ -286,6 +286,53 @@ class Phase2Tests(_Base):
         # the south line runs west, so its left side is south
         self.assertAlmostEqual(c.geometry().boundingBox().yMinimum(), Y0 - 10, places=6)
         self.assertAlmostEqual(c["Distance"], 200, places=6)
+
+class Release05Tests(_Base):
+    """Legal description writer, Compare and the closure report."""
+
+    def setUp(self):
+        super().setUp()
+        self.traverse("Lot", courses(("N 0 E", 100), ("N 90 E", 200), ("S 0 E", 100), ("S 90 W", 200)))
+        build_parcels(self.fab, "Lot", self.rec)
+        self.parcel = next(self.fab.parcels.getFeatures())
+
+    def test_legal_description_of_a_built_parcel(self):
+        from parcel_fabric.core import legal_writer as W
+        from parcel_fabric.core.geomio import polygon_rings, unit_word
+        self.assertEqual(unit_word(self.fab.parcels.crs()), "feet")
+        ext, holes = polygon_rings(self.parcel.geometry())[0]
+        ring = W.rotate_to(W.orient(W.merge_collinear(ext), True), 0)
+        ring = W.rotate_to(ring, W.northwest_index(ring))
+        text, area = W.write(ring)
+        self.assertAlmostEqual(area, 20000, places=3)
+        self.assertIn("N 90°00'00\" E, a distance of 200.00 feet", text)
+
+    def test_compare_with_shifted_copy(self):
+        from qgis.core import QgsFeature, QgsVectorLayer
+        from parcel_fabric.core import compare as CMP
+        ref = QgsVectorLayer("Polygon?crs=EPSG:2238&field=PIN:string", "county", "memory")
+        g = QgsGeometry(self.parcel.geometry().constGet().segmentize())
+        g.translate(0.5, 0.0)
+        f = QgsFeature(ref.fields())
+        f.setGeometry(g)
+        f.setAttributes(["12-4S-16-00001-000"])
+        ref.dataProvider().addFeatures([f])
+        m = CMP.compare([("lot", self.parcel.geometry(), None)], ref, self.fab.parcels.crs(), "PIN")[0]
+        self.assertEqual(m.ref_label, "12-4S-16-00001-000")
+        self.assertAlmostEqual(m.shift, 0.5, places=6)
+        self.assertAlmostEqual(m.hausdorff, 0.5, places=6)
+        self.assertAlmostEqual(m.overlap, 199.5 / 200, places=6)
+
+    def test_closure_report(self):
+        from parcel_fabric.core.reports import boundary_chain, closure_report
+        chain = boundary_chain(self.fab, self.parcel)
+        self.assertEqual(len(chain), 4)
+        path = os.path.join(self.tmp, "closure.html")
+        self.assertEqual(closure_report(self.fab, self.rec, path), 1)
+        with open(path, encoding="utf-8") as fh:
+            html = fh.read()
+        self.assertIn("closed", html)
+        self.assertIn("0.459", html)
 
 
 if __name__ == "__main__":

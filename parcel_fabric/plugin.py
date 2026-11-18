@@ -61,6 +61,11 @@ class ParcelFabricPlugin:
         self._add("history", "Parcel History", lambda: self._window("history"),
                   "A parcel's splits and merges on the map, step by step through time")
         self.toolbar.addSeparator()
+        self._add("legal_writer", "Write Legal Description", lambda: self._window("legal_writer"),
+                  "Metes-and-bounds description of the polygon selected in ANY layer")
+        self._add("compare", "Compare with Existing Parcels", lambda: self._window("compare"),
+                  "Area difference, offsets and slivers between fabric parcels and an existing parcel layer")
+        self.toolbar.addSeparator()
         self._add("numbers", "Assign Parcel Numbers", self.assign_numbers,
                   "Number the selected parcels (new parcels or splits of a parent)")
         self._add("check", "Check Fabric", self.check_fabric,
@@ -206,7 +211,7 @@ class ParcelFabricPlugin:
             self.iface.messageBar().pushSuccess("Parcel Fabric", msg)
 
     def _window(self, kind):
-        if self._need_fabric() is None:
+        if kind != "legal_writer" and self._need_fabric() is None:
             return
         old = self._windows.get(kind)
         try:
@@ -217,11 +222,14 @@ class ParcelFabricPlugin:
         except RuntimeError:          # deleted on close
             pass
         from .ui import edit_dialogs as ED
+        from .ui.compare_dialog import CompareDialog
         from .ui.history_dialog import HistoryDialog
+        from .ui.legal_writer_dialog import LegalWriterDialog
         from .ui.lineage_dialog import LineageDialog
         cls = {"split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
-               "history": HistoryDialog}[kind]
+               "history": HistoryDialog, "legal_writer": LegalWriterDialog,
+               "compare": CompareDialog}[kind]
         w = cls(self.iface, self.manager)
         w.show()
         self._windows[kind] = w

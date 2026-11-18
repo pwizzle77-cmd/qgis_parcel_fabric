@@ -128,8 +128,13 @@ class TraverseDock(QDockWidget):
         create = QPushButton("Create lines")
         create.setDefault(True)
         create.clicked.connect(self._create)
+        cmp_btn = QPushButton("Compare to Selected Polygon")
+        cmp_btn.setToolTip("How well this traverse fits the polygon selected in the active layer "
+                           "(e.g. the existing county parcel)")
+        cmp_btn.clicked.connect(self._compare)
         cr.addWidget(self.build_after)
         cr.addStretch(1)
+        cr.addWidget(cmp_btn)
         cr.addWidget(create)
         lay.addLayout(cr)
         self.setWidget(w)
@@ -411,6 +416,39 @@ class TraverseDock(QDockWidget):
                 self._add_row("Line", {"bearing": U.azimuth_to_bearing(c.azimuth, 2),
                                        "value": "%.4f" % c.distance})
         self._recompute()
+
+    def _compare(self):
+        from qgis.core import Qgis as _Q, QgsCoordinateTransform, QgsProject
+        from ..core.compare import measure
+        fab = self.manager.active
+        self._recompute()
+        if fab is None or self.result is None or not self.closed.isChecked():
+            QMessageBox.information(self, "Compare", "Enter a closed traverse first.")
+            return
+        lyr = self.iface.activeLayer()
+        sel = list(lyr.getSelectedFeatures()) if lyr is not None and hasattr(lyr, "getSelectedFeatures") else []
+        if lyr is None or getattr(lyr, "geometryType", lambda: None)() != _Q.GeometryType.Polygon or len(sel) != 1:
+            QMessageBox.information(self, "Compare", "Select ONE polygon in the active layer (e.g. the "
+                                    "existing parcel), then press Compare again.")
+            return
+        ref = sel[0].geometry()
+        ref.transform(QgsCoordinateTransform(lyr.crs(), fab.points.crs(), QgsProject.instance()))
+        pts = []
+        for leg in self.result.legs:
+            seg = fab.leg_geometry(leg).constGet().segmentize()
+            for i in range(seg.numPoints()):
+                p = seg.pointN(i)
+                pts.append(QgsPoint(p.x(), p.y()))
+        pts.append(QgsPoint(pts[0].x(), pts[0].y()))
+        from qgis.core import QgsPolygon
+        poly = QgsGeometry(QgsPolygon(QgsLineString(pts)))
+        m = measure(poly, ref)
+        diff = (m["area"] - m["ref_area"]) / m["ref_area"] * 100 if m["ref_area"] else 0
+        self.result_lbl.setText(self._summary(fab, self.result) + (
+            "<br><b>Against the selected polygon:</b> area %.3f ac vs %.3f ac (%+.2f%%), largest offset "
+            "%.2f ft, shifted %.2f ft %s, %.1f%% overlap." % (
+                m["area"] / 43560.0, m["ref_area"] / 43560.0, diff, m["hausdorff"], m["shift"],
+                U.azimuth_to_bearing(m["shift_az"]) if m["shift"] > 0.005 else "", m["overlap"] * 100)))
 
     def _create(self):
         fab = self.manager.active

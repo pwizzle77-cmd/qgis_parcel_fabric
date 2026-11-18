@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.4.0, experimental (Phases 1 and 2, plus Parcel History).** Test it on a copy of real data before
+**Status: 0.5.0, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.4.0.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.5.0.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -107,6 +107,26 @@ kept up to date after every build, split, divide, merge and record edit.
   page, document link), what became what with acreages, and a map of that date.
 - Check Fabric warns about records with no recorded date, because history can't
   place them in time.
+
+## Descriptions, comparisons and reports
+
+- **Write Legal Description** – works on the polygon selected in ANY layer (fabric
+  parcels, the county's parcels, a sketch). Choose the coordinate system to measure
+  in, the point of beginning (most northwesterly corner or one you click), direction,
+  and an optional commencement tie from a point you click (e.g. a section corner).
+  True curves are described with radius, central angle, arc and chord, tangent or
+  non-tangent; curves that were densified into many vertices are recognised again;
+  near-straight vertices are joined. Holes become LESS AND EXCEPT parts. `{str}` in
+  the opening line fills in the section, township and range. A **self-check** reads
+  the description back and closes it, so a wrong call can't slip through.
+- **Compare with Existing Parcels** – pairs fabric parcels (selected, in view, or all)
+  with an existing parcel layer, by parcel number or by overlap, and lists area
+  difference, largest offset, shift and overlap. **Show Differences on Map** adds
+  the slivers as a scratch layer.
+- **Traverse > Compare to Selected Polygon** – how a traverse fits an existing polygon
+  before you create anything.
+- **Records > Closure Report** – every course, misclose, precision and area (record
+  vs. coordinates vs. stated) for a record's parcels, as a printable page.
 
 ## Tables
 

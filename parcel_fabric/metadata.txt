@@ -3,7 +3,7 @@ name=Parcel Fabric
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=A records-driven parcel fabric for QGIS: enter plats and deeds as COGO traverses, build parcels and lots with true curves, and track every parcel to the record that created it.
-version=0.4.0
+version=0.5.0
 author=Charles
 email=pwizzle77@gmail.com
 about=Parcel Fabric brings the ArcGIS Pro parcel fabric workflow to QGIS. Every line, point and parcel belongs to the legal record (plat, deed, survey) that created it. Enter courses by hand or paste a metes-and-bounds description, check closure, write COGO-attributed lines with true circular arcs, then Build turns closed loops into parcel polygons and corner points with misclose and area computed from the record dimensions. Check Fabric finds open loops, missing COGO and poor closures. Works in a GeoPackage or any database QGIS connects to (PostgreSQL/PostGIS, SQL Server, Oracle). Field names match the ArcGIS Pro parcel fabric so data moves between them. Pure Python, no external dependencies. Independent of Esri.
@@ -11,6 +11,7 @@ tracker=https://github.com/pwizzle77-cmd/qgis_parcel_fabric/issues
 repository=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 homepage=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 changelog=
+    0.5.0 - Legal description writer for any selected polygon (curves, POB, commencement tie, self-check); Compare with existing parcels; Traverse compare; plat closure report
     0.4.0 - Parcel History: parcel start/end dates from records, time-enabled history layer, family view with timeline, playback and printable handout
     0.3.0 - Phase 2: Split, Divide (equal area/width/set area), Merge, Copy Parallel, remainder choice, Parcel_Lineage table with lineage viewer and CSV/DOT/HTML export
     0.2.0 - One Parcels and Parcel_Lines table with ParcelType; record Book/Page and editing; document folder with auto-named files; parcel numbers (Sec-Twp-Rng-ID-Split) from a PLSS layer, with splits

@@ -70,6 +70,7 @@ class RecordsDock(QDockWidget):
              ("Set Active", self._activate, "New lines and parcels will belong to this record")],
             [("Zoom To", self._zoom, "Zoom to the record's parcels"),
              ("Document", self._open_doc, "Open the record's scanned document"),
+             ("Closure Report...", self._closure_report, "Every course, misclose and area for the record's parcels"),
              ("Settings...", self._settings, "Fabric settings: documents, parcel numbers, tolerances")],
         ]:
             hb = QHBoxLayout()
@@ -253,6 +254,30 @@ class RecordsDock(QDockWidget):
             QMessageBox.information(self, "Document", "This record has no document. Use Edit... to attach one.")
             return
         open_document(self, str(path))
+
+    def _closure_report(self):
+        fab = self.manager.active
+        gid = self._selected_gid() or self.manager.active_record_id
+        rec = fab.record_by_id(gid) if fab and gid else None
+        if rec is None:
+            QMessageBox.information(self, "Closure Report", "Select a record (or set one active).")
+            return
+        from qgis.PyQt.QtCore import QUrl
+        from qgis.PyQt.QtGui import QDesktopServices
+        from qgis.PyQt.QtWidgets import QFileDialog
+        from ..core.reports import closure_report
+        name = str(rec["Name"] or "record").replace("/", "-")
+        path, _ = QFileDialog.getSaveFileName(self, "Closure report", name + " closure.html", "Web page (*.html)")
+        if not path:
+            return
+        try:
+            n = closure_report(fab, gid, path)
+        except Exception as e:
+            QMessageBox.critical(self, "Closure Report", str(e))
+            return
+        if n == 0:
+            QMessageBox.information(self, "Closure Report", "That record has no current parcels yet.")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _settings(self):
         fab = self.manager.active

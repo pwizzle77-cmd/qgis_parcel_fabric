@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.6.0, experimental.** Test it on a copy of real data before
+**Status: 0.7.0, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.6.0.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.7.0.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -149,6 +149,26 @@ kept up to date after every build, split, divide, merge and record edit.
 PDF pages are rendered with Qt's PDF module, GDAL's PDF driver, or Poppler's
 `pdftoppm`, whichever this QGIS has.
 
+## Least-squares adjustment (Phase 3)
+
+**Least-Squares Adjustment** treats each fabric line's record bearing and distance
+(curves by their chord) as observations between the points at its ends.
+
+- **Consistency check** – no control: one point is held and the rest float, so record
+  dimensions that disagree with their neighbours stand out (normalized residual over 3).
+- **Weighted adjustment** – fixed control (`AdjustmentConstraint` = XY constrained, or
+  **Mark Selected Points as Control**) and weighted control (XY weighted, with
+  `QPF_StdDevXY`). Measured dimensions weigh twice a record one; computed and estimated
+  ones much less.
+- Results: standard error of unit weight and a chi-square test, the worst residuals
+  (double-click to zoom), and **Show Results on Map** – line residuals (red = disagree),
+  point movements and error ellipses (drawn enlarged).
+- **Apply to Fabric** moves the points, reshapes their lines (curves keep their shape)
+  and rebuilds the parcels. COGO dimensions are never changed.
+
+The solver is built in (numpy). DynAdjust isn't wired in yet; very large networks
+(thousands of points) may be slow.
+
 ## Tables
 
 | Table | Geometry | Notes |
@@ -179,7 +199,7 @@ QGIS integration tests (Windows example):
 
 ## Roadmap
 
-Phase 3: least-squares adjustment. Phase 4:
+Phase 4:
 multi-user editing, history, subdivision layout, reports, imports.
 
 ## License

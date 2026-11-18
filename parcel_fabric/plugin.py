@@ -65,6 +65,8 @@ class ParcelFabricPlugin:
                   "Metes-and-bounds description of the polygon selected in ANY layer")
         self._add("compare", "Compare with Existing Parcels", lambda: self._window("compare"),
                   "Area difference, offsets and slivers between fabric parcels and an existing parcel layer")
+        self._add("adjust", "Least-Squares Adjustment", lambda: self._window("adjust"),
+                  "Consistency check of record dimensions, or a weighted adjustment to control")
         self.toolbar.addSeparator()
         self._add("numbers", "Assign Parcel Numbers", self.assign_numbers,
                   "Number the selected parcels (new parcels or splits of a parent)")
@@ -222,6 +224,7 @@ class ParcelFabricPlugin:
         except RuntimeError:          # deleted on close
             pass
         from .ui import edit_dialogs as ED
+        from .ui.adjust_dialog import AdjustDialog
         from .ui.compare_dialog import CompareDialog
         from .ui.history_dialog import HistoryDialog
         from .ui.legal_writer_dialog import LegalWriterDialog
@@ -229,7 +232,7 @@ class ParcelFabricPlugin:
         cls = {"split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
                "history": HistoryDialog, "legal_writer": LegalWriterDialog,
-               "compare": CompareDialog}[kind]
+               "compare": CompareDialog, "adjust": AdjustDialog}[kind]
         w = cls(self.iface, self.manager)
         w.show()
         self._windows[kind] = w

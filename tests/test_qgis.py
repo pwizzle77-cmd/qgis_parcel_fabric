@@ -287,6 +287,48 @@ class Phase2Tests(_Base):
         self.assertAlmostEqual(c.geometry().boundingBox().yMinimum(), Y0 - 10, places=6)
         self.assertAlmostEqual(c["Distance"], 200, places=6)
 
+class AdjustTests(_Base):
+    def setUp(self):
+        super().setUp()
+        self.traverse("Lot", courses(("N 0 E", 100), ("N 90 E", 200), ("S 0 E", 100), ("S 90 W", 200)))
+        build_parcels(self.fab, "Lot", self.rec)
+        self.box = QgsRectangle(X0 - 50, Y0 - 50, X0 + 250, Y0 + 150)
+
+    def test_consistency_check_fits(self):
+        from parcel_fabric.core import adjust as ADJ
+        from parcel_fabric.core import lsa
+        net = ADJ.collect(self.fab, "view", extent=self.box, use_control=False)
+        self.assertEqual(len(net.points), 4)
+        self.assertEqual(len(net.obs), 8)
+        res = lsa.adjust(net.points, net.obs)
+        self.assertTrue(res.converged)
+        self.assertLess(max(abs(o.residual) for o in res.obs), 1e-4)
+
+    def test_adjust_to_control_and_apply(self):
+        from qgis.core import QgsGeometry, QgsPoint
+        from parcel_fabric.core import adjust as ADJ
+        from parcel_fabric.core import lsa
+        from parcel_fabric.core.fabric import EditSession
+        pts = {round(f.geometry().asPoint().x() - X0) * 1000 + round(f.geometry().asPoint().y() - Y0): f
+               for f in self.fab.points.getFeatures()}
+        sw, ne = pts[0], pts[200 * 1000 + 100]
+        # the surveyed control puts the lot 0.5 ft east of where it was drawn
+        with EditSession([self.fab.points]) as ed:
+            for f in (sw, ne):
+                q = f.geometry().asPoint()
+                ed.set_geometry(self.fab.points, f.id(), QgsGeometry(QgsPoint(q.x() + 0.5, q.y())))
+        ADJ.mark_control(self.fab, [sw.id(), ne.id()], 1)
+        net = ADJ.collect(self.fab, "view", extent=self.box, use_control=True)
+        res = lsa.adjust(net.points, net.obs)
+        self.assertTrue(res.converged)
+        moved, nlines, rebuilt = ADJ.apply(self.fab, net, res)
+        self.assertEqual(moved, 2)               # the two free corners follow the control
+        self.assertEqual(nlines, 4)
+        p = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+        self.assertAlmostEqual(p.geometry().boundingBox().xMinimum(), X0 + 0.5, places=4)
+        self.assertEqual(rebuilt, 1)
+
+
 class Release05Tests(_Base):
     """Legal description writer, Compare and the closure report."""
 

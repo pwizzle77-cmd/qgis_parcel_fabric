@@ -114,7 +114,8 @@ PARCEL_FIELDS = [
     ("Section", INT, 0, "Section"),
     ("Township", STR, 4, "Township"),
     ("Range", INT, 0, "Range"),
-    ("ParcelID", INT, 0, "Parcel ID"),
+    ("ParcelID", STR, 12, "Parcel ID"),              # 02942-000: the number without S-T-R
+    ("ParcelSeq", INT, 0, "Parcel sequence"),        # 2942
     ("SplitNo", INT, 0, "Split"),
     ("ParentNumber", STR, 30, "Parent parcel number"),
     ("Name", STR, 255, "Name"),
@@ -234,6 +235,50 @@ def add_missing_fields(lyr, role):
                            % (", ".join(f.name() for f in missing), lyr.name()))
     lyr.updateFields()
     return [f.name() for f in missing]
+
+
+def parcel_id_text(number):
+    """"12-4S-16-02942-000" -> "02942-000" (the last two parts)."""
+    parts = str(number or "").split("-")
+    return "-".join(parts[-2:]) if len(parts) >= 5 else None
+
+
+def migrate_parcel_id(lyr):
+    """0.8.0 and earlier stored ParcelID as the bare number (2942). It is now
+    text "02942-000"; the bare number moves to ParcelSeq. Also fills any
+    ParcelID left empty. Returns the number of parcels updated."""
+    from qgis.core import QgsFeatureRequest
+    prov = lyr.dataProvider()
+    idx = lyr.fields().indexOf("ParcelID")
+    if idx >= 0 and lyr.fields().at(idx).isNumeric():
+        if lyr.fields().indexOf("ParcelSeq") < 0:
+            if not prov.addAttributes([QgsField("ParcelSeq", _mt(INT))]):
+                raise RuntimeError("Could not add ParcelSeq to %s" % lyr.name())
+            lyr.updateFields()
+        seq = lyr.fields().indexOf("ParcelSeq")
+        prov.changeAttributeValues({f.id(): {seq: f["ParcelID"]} for f in lyr.getFeatures(
+            QgsFeatureRequest().setSubsetOfAttributes(["ParcelID"], lyr.fields())
+            .setFlags(Qgis.FeatureRequestFlag.NoGeometry)) if f["ParcelID"]})
+        if not prov.deleteAttributes([idx]):
+            raise RuntimeError("Could not convert ParcelID to text in %s - drop that field in the "
+                               "database and reopen the fabric." % lyr.name())
+        lyr.updateFields()
+        if not prov.addAttributes([QgsField("ParcelID", _mt(STR), len=12)]):
+            raise RuntimeError("Could not add ParcelID to %s" % lyr.name())
+        lyr.updateFields()
+    idx = lyr.fields().indexOf("ParcelID")
+    if idx < 0:
+        return 0
+    req = QgsFeatureRequest().setSubsetOfAttributes(["ParcelNumber", "ParcelID"], lyr.fields())
+    req.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+    changes = {}
+    for f in lyr.getFeatures(req):
+        want = parcel_id_text(f["ParcelNumber"])
+        if want and (f["ParcelID"] or None) != want:
+            changes[f.id()] = {idx: want}
+    if changes:
+        prov.changeAttributeValues(changes)
+    return len(changes)
 
 
 # --------------------------------------------------------------------------

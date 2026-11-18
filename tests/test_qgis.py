@@ -150,11 +150,29 @@ class FabricTests(_Base):
         self.assertEqual(rep.created, 2, rep.issues)
         nums = sorted(f["ParcelNumber"] for f in self.fab.parcels.getFeatures())
         self.assertEqual(nums, ["12-4S-16-00001-000", "12-4S-16-00002-000"])
+        ids = sorted((f["ParcelID"], f["ParcelSeq"]) for f in self.fab.parcels.getFeatures())
+        self.assertEqual(ids, [("00001-000", 1), ("00002-000", 2)])
         # splits of the first one
         kids = [f for f in self.fab.parcels.getFeatures()]
         PN.number_splits(self.fab, "12-4S-16-00001-000", kids)
         self.assertEqual(sorted(f["ParcelNumber"] for f in kids),
                          ["12-4S-16-00001-001", "12-4S-16-00001-002"])
+
+    def test_old_integer_parcel_id_is_migrated(self):
+        from osgeo import ogr
+        self.traverse("Tax", courses(("N 0 E", 100), ("N 90 E", 100), ("S 0 E", 100), ("S 90 W", 100)))
+        build_parcels(self.fab, "Tax", self.rec)
+        QgsProject.instance().clear()
+        ds = ogr.Open(self.path, 1)               # make it look like a 0.8.0 fabric
+        ds.ExecuteSQL('ALTER TABLE "Parcels" DROP COLUMN "ParcelID"')
+        ds.ExecuteSQL('ALTER TABLE "Parcels" DROP COLUMN "ParcelSeq"')
+        ds.ExecuteSQL('ALTER TABLE "Parcels" ADD COLUMN "ParcelID" INTEGER')
+        ds.ExecuteSQL('UPDATE "Parcels" SET "ParcelNumber" = \'12-4S-16-02942-003\', "ParcelID" = 2942')
+        ds = None
+        fab = Fabric.open("ogr", self.path)
+        f = next(fab.parcels.getFeatures())
+        self.assertEqual(f["ParcelID"], "02942-003")
+        self.assertEqual(f["ParcelSeq"], 2942)
 
     def test_check_finds_dangle(self):
         self.traverse("Tax", courses(("N 0 E", 100), ("N 90 E", 100)))

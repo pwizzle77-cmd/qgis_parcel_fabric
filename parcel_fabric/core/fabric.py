@@ -91,6 +91,8 @@ class Fabric:
         for role in (S.ROLE_RECORDS, S.ROLE_POINTS, S.ROLE_CONNECTIONS, S.ROLE_PARCELS, S.ROLE_LINES,
                      S.ROLE_LINEAGE):
             lyr = S.load_table(conn, provider, schema, S.table_name(prefix, role), LAYER_LABELS[role])
+            if role == S.ROLE_PARCELS:
+                S.migrate_parcel_id(lyr)
             S.add_missing_fields(lyr, role)
             lyr.setCustomProperty(PROP_FABRIC, fid)
             lyr.setCustomProperty(PROP_ROLE, role)

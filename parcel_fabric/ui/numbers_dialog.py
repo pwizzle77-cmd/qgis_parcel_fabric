@@ -168,7 +168,7 @@ class NumbersDialog(QDialog):
             if not self._planned:
                 return
         lyr = self.fabric.parcels
-        fields = ["ParcelNumber", "Section", "Township", "Range", "ParcelID", "SplitNo", "ParentNumber"]
+        fields = ["ParcelNumber", "Section", "Township", "Range", "ParcelID", "ParcelSeq", "SplitNo", "ParentNumber"]
         rec = self.manager.active_record_id
         retire_parent = None
         if self.rb_split.isChecked() and self.retire.isChecked():

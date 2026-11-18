@@ -51,7 +51,9 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    section-township-range (split `000`), or number them as splits of a parent:
    `-001`, `-002`... continuing from the highest split already used, north-west
    to south-east. The parent can be retired by the active record at the same
-   time. Retired numbers are never reused.
+   time. Retired numbers are never reused. Each parcel also gets its parts:
+   `Section` 12, `Township` 4S, `Range` 16, `ParcelID` `02942-000` (the number
+   without section-township-range), `ParcelSeq` 2942 and `SplitNo` 0.
 6. **Check Fabric** – open loops, lines without COGO, line ends without points,
    poor misclose, stated vs calculated area over 1%, unbuilt seeds, features with
    no record. Double-click a row to zoom.
@@ -223,7 +225,7 @@ same parcel. Installing triggers needs a login that may create them.
 Features are retired (`RetiredByRecord`), never deleted. Pro keeps one table per
 parcel type; here they share one, so an export to Pro splits on `ParcelType`.
 Plugin fields are `ParcelType`, `ParcelNumber`, `Section`, `Township`, `Range`,
-`ParcelID`, `SplitNo`, `ParentNumber`, `Book`, `Page` and the `QPF_` fields. **To verify against a fabric exported from Pro before 1.0:** the
+`ParcelID`, `ParcelSeq`, `SplitNo`, `ParentNumber`, `Book`, `Page` and the `QPF_` fields. **To verify against a fabric exported from Pro before 1.0:** the
 Records date and type field names and the coded values of `COGOType`,
 `StatedAreaUnit` and `AdjustmentConstraint`.
 

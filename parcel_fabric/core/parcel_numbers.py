@@ -32,7 +32,8 @@ def number_fields(number):
     p = N.parse_number(number)
     return {"ParcelNumber": number, "Section": p["section"],
             "Township": "%d%s" % (p["township"], p["twp_dir"]), "Range": p["range"],
-            "ParcelID": p["pid"], "SplitNo": p["split"]}
+            "ParcelID": "%05d-%03d" % (p["pid"], p["split"]), "ParcelSeq": p["pid"],
+            "SplitNo": p["split"]}
 
 
 def unfiltered(layer):

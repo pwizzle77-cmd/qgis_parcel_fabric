@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Read Deed (AI): deed file -> text -> calls -> review -> Traverse.
 
-Uses a local Ollama server.  The COGO Workbench parser reads the calls
+Uses the AI service configured in Fabric Settings. The COGO Workbench parser reads the calls
 first; the AI model is only asked about clauses the parser couldn't read,
 must quote the deed, and is checked against that quote.  Nothing loads into
 Traverse until the reviewer ticks the box.
@@ -20,12 +20,12 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core import cogo as C
 from ..core import deed_ai as A
+from ..core import ai_service as AI
 from ..core import ollama as OL
 from ..core import units as U
 from ..core.legal_import import parse, to_course
 
-S_URL, S_OCR, S_LLM, S_DIR = ("ParcelFabric/ollama_url", "ParcelFabric/ollama_ocr_model",
-                              "ParcelFabric/ollama_llm_model", "ParcelFabric/deed_dir")
+S_DIR = "ParcelFabric/deed_dir"
 FILTER = "Deeds (*.pdf *.png *.jpg *.jpeg *.tif *.tiff);;All files (*)"
 GREEN, ORANGE, RED, GREY = QColor("#1b5e20"), QColor("#a35a00"), QColor("#b3261e"), QColor("#666666")
 
@@ -41,7 +41,7 @@ class DeedReaderDialog(QDialog):
         self._task = None
         self.setWindowTitle("Read Deed (AI)")
         self.resize(900, 760)
-        s = QgsSettings()
+        self.ai_config = AI.load(QgsSettings())
         lay = QVBoxLayout(self)
 
         frow = QHBoxLayout()
@@ -55,12 +55,16 @@ class DeedReaderDialog(QDialog):
 
         form = QFormLayout()
         urow = QHBoxLayout()
-        self.url = QLineEdit(s.value(S_URL, OL.DEFAULT_URL, type=str))
+        self.url = QLineEdit(self.ai_config["url"])
+        self.url.setReadOnly(True)
+        settings = QPushButton("AI Settings...")
+        settings.clicked.connect(self._settings)
         refresh = QPushButton("Find Models")
         refresh.clicked.connect(self._load_models)
         urow.addWidget(self.url, 1)
         urow.addWidget(refresh)
-        form.addRow("Ollama", urow)
+        urow.addWidget(settings)
+        form.addRow("AI service", urow)
         mrow = QHBoxLayout()
         self.ocr_model = QComboBox()
         self.ocr_model.setEditable(True)
@@ -77,6 +81,9 @@ class DeedReaderDialog(QDialog):
         mrow.addWidget(self.dpi)
         form.addRow("Models", mrow)
         lay.addLayout(form)
+        self.ai_notice = QLabel()
+        self.ai_notice.setWordWrap(True)
+        lay.addWidget(self.ai_notice)
 
         steps = QHBoxLayout()
         self.read_btn = QPushButton("1. Read Document")
@@ -140,30 +147,50 @@ class DeedReaderDialog(QDialog):
         self._load_models(quiet=True)
 
     # ------------------------------------------------------------------
-    def _load_models(self, quiet=False):
-        url = self.url.text().strip() or OL.DEFAULT_URL
-        s = QgsSettings()
+    def _settings(self):
+        if self._task is not None:
+            QMessageBox.information(self, self.windowTitle(), "Wait for the current AI request to finish.")
+            return
+        from .settings_dialog import SettingsDialog
+        if self.fabric is not None and SettingsDialog(self.fabric, self).exec():
+            self.ai_config = AI.load(QgsSettings())
+            self._load_models(quiet=True)
+
+    def _client(self):
         try:
-            models = OL.list_models(url)
-        except OL.OllamaError as e:
-            if not quiet:
-                QMessageBox.warning(self, self.windowTitle(), str(e))
-            self.status.setText(str(e))
-            models = []
-        for combo, key, prefs in ((self.ocr_model, S_OCR, ("deepseek-ocr", "qwen2.5vl", "gemma4")),
-                                  (self.llm_model, S_LLM, ("qwen2.5vl", "gemma4", "qwen2.5-coder"))):
+            return AI.client(self.ai_config)
+        except AI.AIError as error:
+            QMessageBox.warning(self, self.windowTitle(), str(error))
+            return None
+
+    def _load_models(self, quiet=False):
+        config = self.ai_config
+        self.url.setText(config["url"])
+        label = AI.PROVIDERS[config["provider"]][0]
+        self.ai_notice.setText(label + (": uses this computer with downloaded local models."
+            if config["provider"] == "ollama" else ": AI requests send deed text/images to "
+            + config["url"] + ". Hosted services may charge for usage."))
+        models = []
+        # Opening a deed should not unlock credentials or contact a hosted service.
+        if not quiet or config["provider"] == "ollama":
+            client = self._client()
+            if client is not None:
+                try:
+                    models = client.list_models()
+                except AI.AIError as error:
+                    if not quiet:
+                        QMessageBox.warning(self, self.windowTitle(), str(error))
+                    self.status.setText(str(error))
+        for combo, key, prefs in ((self.ocr_model, "ocr_model", ("deepseek-ocr", "qwen2.5vl", "gemma4")),
+                                  (self.llm_model, "llm_model", ("qwen2.5vl", "gemma4", "qwen2.5-coder"))):
             combo.clear()
             combo.addItems(models)
-            saved = s.value(key, "", type=str)
-            combo.setCurrentText(saved if saved and (saved in models or not models) else OL.pick(models, *prefs))
-        if models:
-            s.setValue(S_URL, url)
+            saved = config[key]
+            combo.setCurrentText(saved or (OL.pick(models, *prefs) if config["provider"] == "ollama" else ""))
 
     def _save_choices(self):
-        s = QgsSettings()
-        s.setValue(S_URL, self.url.text().strip())
-        s.setValue(S_OCR, self.ocr_model.currentText())
-        s.setValue(S_LLM, self.llm_model.currentText())
+        self.ai_config.update(ocr_model=self.ocr_model.currentText(), llm_model=self.llm_model.currentText())
+        AI.save(QgsSettings(), self.ai_config)
 
     def _browse(self):
         start = QgsSettings().value(S_DIR, "", type=str)
@@ -179,7 +206,11 @@ class DeedReaderDialog(QDialog):
         if self._task is not None:
             QMessageBox.information(self, self.windowTitle(), "Still working - please wait.")
             return
-        self._save_choices()
+        try:
+            self._save_choices()
+        except AI.AIError as error:
+            QMessageBox.warning(self, self.windowTitle(), str(error))
+            return
         self.status.setText(label + "...")
         self.setCursor(Qt.CursorShape.BusyCursor)
 
@@ -199,22 +230,31 @@ class DeedReaderDialog(QDialog):
         if not os.path.isfile(path):
             QMessageBox.information(self, self.windowTitle(), "Pick the deed file first.")
             return
-        url, model, dpi = self.url.text().strip(), self.ocr_model.currentText(), self.dpi.value()
+        model, dpi = self.ocr_model.currentText(), self.dpi.value()
 
         def work(task):
             from ..core import deed_pages
-            images, text_pages = deed_pages.load(path, dpi)
+            return deed_pages.load(path, dpi)
+
+        def loaded(result):
+            images, text_pages = result
             if text_pages:
-                return "text", text_pages
-            if not model:
-                raise RuntimeError("Choose a model to read the pages with (Find Models).")
-            out = []
-            for i, img in enumerate(images):
-                if task.isCanceled():
-                    raise RuntimeError("Cancelled")
-                task.setProgress(100.0 * i / max(1, len(images)))
-                out.append(OL.chat(url, model, A.ocr_prompt(model), [img]))
-            return "ocr", out
+                done(("text", text_pages))
+                return
+            client = self._client()
+            if client is None:
+                return
+
+            def ocr(task):
+                out = []
+                for i, img in enumerate(images):
+                    if task.isCanceled():
+                        raise RuntimeError("Cancelled")
+                    task.setProgress(100.0 * i / max(1, len(images)))
+                    out.append(client.chat(model, A.ocr_prompt(model), [img]))
+                return "ocr", out
+
+            self._run("Reading pages with %s" % model, ocr, done)
 
         def done(result):
             how, pages = result
@@ -224,7 +264,7 @@ class DeedReaderDialog(QDialog):
                 len(pages), "from the PDF's text layer" if how == "text" else "with " + model))
             self._find()
 
-        self._run("Reading %s" % os.path.basename(path), work, done)
+        self._run("Reading %s" % os.path.basename(path), work, loaded)
 
     def _find(self):
         d = A.find_description(self.deed_text.toPlainText())
@@ -240,14 +280,17 @@ class DeedReaderDialog(QDialog):
         text = self.deed_text.toPlainText().strip()
         if not text:
             return
-        url, model = self.url.text().strip(), self.llm_model.currentText()
+        client = self._client()
+        if client is None:
+            return
+        model = self.llm_model.currentText()
 
         def work(task):
-            return OL.chat(url, model, A.FIND_PROMPT % text[:20000])
+            return client.chat(model, A.FIND_PROMPT % text[:20000])
 
         def done(result):
             # keep only what is really in the deed
-            if not A.quote_in_text(result[:200], text):
+            if not A.quote_in_text(result, text):
                 self.status.setText("<span style='color:#b3261e'>The model's answer isn't word-for-word from "
                                     "the deed, so it wasn't used.</span>")
                 return
@@ -350,7 +393,10 @@ class DeedReaderDialog(QDialog):
             if not targets:
                 QMessageBox.information(self, self.windowTitle(), "Every boundary call was read already.")
                 return
-        url, model = self.url.text().strip(), self.llm_model.currentText()
+        client = self._client()
+        if client is None:
+            return
+        model = self.llm_model.currentText()
         desc = self.desc.toPlainText()
         sources = [desc if i is None else self.rows[i]["source"] for i in targets]
 
@@ -360,7 +406,7 @@ class DeedReaderDialog(QDialog):
                 if task.isCanceled():
                     raise RuntimeError("Cancelled")
                 task.setProgress(100.0 * k / len(sources))
-                answers.append(OL.chat_json(url, model, A.CALLS_PROMPT % src, A.CALL_SCHEMA))
+                answers.append(client.chat_json(model, A.CALLS_PROMPT % src, A.CALL_SCHEMA))
             return answers
 
         def done(answers):
@@ -400,6 +446,10 @@ class DeedReaderDialog(QDialog):
         self.load_btn.setEnabled(ok and self.reviewed.isChecked())
 
     def _accept(self):
+        if not self.courses or not self.reviewed.isChecked():
+            QMessageBox.information(self, self.windowTitle(),
+                                    "Check every call against the deed before loading into Traverse.")
+            return
         if self.attach.isChecked():
             self._attach_to_record()
         self.accept()

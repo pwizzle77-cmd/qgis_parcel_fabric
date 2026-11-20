@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.7.0, experimental.** Test it on a copy of real data before
+**Status: 0.8.5, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.7.0.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.8.5.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -41,6 +41,12 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    uses COGO Workbench's parser and review step. The panel shows misclose, ratio
    and area live; Compass rule adjustment is optional. **Create lines** writes
    COGO-attributed lines (true arcs) and corner points, and can build the parcel.
+   Start X/Y are in the fabric CRS. Traverse converts course offsets from the
+   selected foot definition to the fabric's linear map units, so meter-based
+   fabrics draw at the correct size too. Record COGO dimensions, closure and
+   calculated area remain in feet/square feet. Geographic (degree) fabric CRSs
+   are rejected. This conversion affects newly created traverses; existing lines
+   are not resized.
 4. **Build** – closed loops of current lines become parcels with true curves.
    A seed polygon (`IsSeed = 1`) inside a loop passes its name on. Misclose and
    `CalculatedArea` come from the record dimensions. The record's footprint and
@@ -130,14 +136,15 @@ kept up to date after every build, split, divide, merge and record edit.
 - **Records > Closure Report** – every course, misclose, precision and area (record
   vs. coordinates vs. stated) for a record's parcels, as a printable page.
 
-## Read Deed (AI) – optional, uses a local Ollama
+## Read Deed (AI) – optional, configurable services
 
 **Traverse > Read Deed (AI)...** turns a deed file into Traverse courses:
 
 1. **Read Document** – a text PDF is read directly; scanned PDFs and images (PNG, JPG,
    TIF, multi-page TIF) are turned into page images and transcribed by a vision model
-   running in [Ollama](https://ollama.com) on your own computer (default
-   `deepseek-ocr`; `qwen2.5vl` and `gemma4` also work). Nothing is sent anywhere else.
+   using your configured AI service. The default is [Ollama](https://ollama.com)
+   on your own computer (`deepseek-ocr`; `qwen2.5vl` and `gemma4` also work).
+   With Ollama, use a downloaded local model.
    The text is editable so you can fix misread characters.
 2. **Find Description** – picks out the legal description (from "Commence/Begin at"
    to the last "Point of Beginning"); **Ask AI to Find It** is the fallback.
@@ -150,6 +157,33 @@ kept up to date after every build, split, divide, merge and record edit.
 
 PDF pages are rendered with Qt's PDF module, GDAL's PDF driver, or Poppler's
 `pdftoppm`, whichever this QGIS has.
+
+Open **Fabric Settings > AI Services**, or **AI Settings...** in Read Deed, to
+select Ollama, OpenAI, LM Studio, or a custom OpenAI-compatible service. Each
+service remembers its API base URL, page-reading model and description/call
+model. Use **Find Models / Test Connection**, or type model IDs directly. The
+page-reading model must support images. Custom services must implement
+`GET /models` (optional if you type model IDs) and `POST /chat/completions`
+under the base URL, with OpenAI text/image message formats. See the
+[OpenAI API reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+and [LM Studio compatibility documentation](https://lmstudio.ai/docs/developer/openai-compat).
+
+API keys use QGIS's encrypted Authentication Manager: create/select a **Basic**
+configuration with Username `api-key` and the API key in Password. Keys are sent
+as Bearer tokens; the username is not sent. The plugin stores only the credential
+ID and service preferences in your QGIS profile, never in the shared fabric.
+Switching services retains each service's configuration; Cancel discards edits.
+
+Hosted AI requests send deed text or page images to the configured service and
+may incur charges. The selected endpoint is shown in Read Deed. Opening the
+dialog makes no hosted API request. Text PDFs, deterministic parsing and manual
+entry need no AI key. Quote/number checks and the review checkbox apply to every
+service. HTTPS is required outside loopback; proxies and redirects are disabled.
+
+The Ollama URL must use `localhost`, `127.0.0.1`, or `::1`; HTTP proxies and
+redirects are disabled, and cloud-tagged models are rejected. For server-wide
+local-only operation, Ollama also supports `OLLAMA_NO_CLOUD=1` (restart Ollama
+after setting it; see the [Ollama FAQ](https://docs.ollama.com/faq)).
 
 ## Least-squares adjustment (Phase 3)
 

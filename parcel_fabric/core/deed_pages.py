@@ -8,12 +8,13 @@ already contain text give that text directly (no OCR needed).
 """
 
 import base64
+import importlib
 import os
 import shutil
 import subprocess  # nosec B404 - only runs pdftoppm, found on PATH, with a fixed argument list
 import tempfile
 
-from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt
+from qgis.PyQt.QtCore import QBuffer, QByteArray, QIODevice, QSize, Qt, QT_VERSION
 from qgis.PyQt.QtGui import QImage, QImageReader
 
 MAX_SIDE = 1800       # long side in pixels sent to the model
@@ -24,39 +25,55 @@ class DeedReadError(RuntimeError):
 
 
 def _to_b64(img):
+    if img.isNull():
+        raise DeedReadError("A document page could not be rendered.")
     if max(img.width(), img.height()) > MAX_SIDE:
         img = img.scaled(MAX_SIDE, MAX_SIDE, Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
     ba = QByteArray()
     buf = QBuffer(ba)
     buf.open(QIODevice.OpenModeFlag.WriteOnly)
-    img.save(buf, "PNG")
+    saved = img.save(buf, "PNG")
     buf.close()
+    if not saved:
+        raise DeedReadError("A document page could not be encoded as PNG.")
     return base64.b64encode(bytes(ba)).decode("ascii")
 
 
 def image_pages(path):
     reader = QImageReader(path)
+    count = max(1, reader.imageCount())
     pages = []
-    while True:
+    for i in range(count):
+        # Some TIFF handlers implement absolute page seeking but not jumpToNextImage.
+        if i:
+            reader = QImageReader(path)
+            if not reader.jumpToImage(i):
+                raise DeedReadError("Couldn't seek to image page %d." % (i + 1))
         img = reader.read()
         if img.isNull():
-            break
+            raise DeedReadError("Couldn't read image page %d (%s)." % (i + 1, reader.errorString()))
         pages.append(_to_b64(img))
-        if not reader.jumpToNextImage():
-            break
-    if not pages:
-        raise DeedReadError("Couldn't read the image %s (%s)" % (os.path.basename(path), reader.errorString()))
     return pages
+
+
+def _pdf_document():
+    """QGIS does not expose QtPdf in its PyQt shim on every supported build."""
+    try:
+        from qgis.PyQt.QtPdf import QPdfDocument
+    except ImportError:
+        try:
+            QPdfDocument = importlib.import_module("PyQt%d.QtPdf" % (QT_VERSION >> 16)).QPdfDocument
+        except ImportError:
+            return None
+    return QPdfDocument(None)
 
 
 def pdf_text(path):
     """Text layer of a PDF, page by page, or [] if there isn't one/we can't read it."""
-    try:
-        from qgis.PyQt.QtPdf import QPdfDocument
-    except ImportError:
+    doc = _pdf_document()
+    if doc is None:
         return []
-    doc = QPdfDocument(None)
     doc.load(path)
     out = []
     for i in range(doc.pageCount()):
@@ -69,11 +86,9 @@ def pdf_text(path):
 
 
 def _pdf_qt(path, dpi):
-    try:
-        from qgis.PyQt.QtPdf import QPdfDocument
-    except ImportError:
+    doc = _pdf_document()
+    if doc is None:
         return None
-    doc = QPdfDocument(None)
     doc.load(path)
     if doc.pageCount() <= 0:
         return None

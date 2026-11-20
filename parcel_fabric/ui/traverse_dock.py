@@ -345,11 +345,11 @@ class TraverseDock(QDockWidget):
         try:
             res = C.compute(start, courses, close_to=start if self.closed.isChecked() else False,
                             rotation=math.radians(rot), scale=scale)
+            self._draw(fab, res, start)
         except ValueError as e:
             self.result_lbl.setText("<span style='color:#b3261e'>%s</span>" % e)
             return
         self.result = res
-        self._draw(fab, res, start)
         self.result_lbl.setText(self._summary(fab, res))
 
     def _summary(self, fab, res):
@@ -365,7 +365,7 @@ class TraverseDock(QDockWidget):
                     "{:,}".format(int(res.ratio))))
             lines.append("Area %s sq ft  =  %.4f acres" % ("{:,.1f}".format(res.area), res.area / 43560.0))
         else:
-            e = res.end_point
+            e = fab.traverse_map_legs(res.legs)[-1].end
             lines.append("Ends at %.3f, %.3f" % e)
         return "<br>".join(lines)
 
@@ -377,7 +377,8 @@ class TraverseDock(QDockWidget):
 
     def _draw(self, fab, res, start):
         pts = []
-        for leg in res.legs:
+        legs = fab.traverse_map_legs(res.legs)
+        for leg in legs:
             g = fab.leg_geometry(leg)
             seg = g.constGet().segmentize()
             for i in range(seg.numPoints()):
@@ -388,7 +389,7 @@ class TraverseDock(QDockWidget):
         crs = fab.points.crs()
         self.band.setToGeometry(QgsGeometry(QgsLineString(pts)), crs)
         if self.closed.isChecked() and res.misclose > 1e-6:
-            e = res.end_point
+            e = legs[-1].end
             self.gap.setToGeometry(QgsGeometry(QgsLineString([QgsPoint(*e), QgsPoint(*start)])), crs)
 
     def _picked(self, pt, name):
@@ -449,8 +450,9 @@ class TraverseDock(QDockWidget):
         ref = sel[0].geometry()
         ref.transform(QgsCoordinateTransform(lyr.crs(), fab.points.crs(), QgsProject.instance()))
         pts = []
-        for leg in self.result.legs:
-            seg = fab.leg_geometry(leg).constGet().segmentize()
+        for leg in fab.traverse_map_legs(self.result.legs):
+            geometry = fab.leg_geometry(leg)
+            seg = geometry.constGet().segmentize()
             for i in range(seg.numPoints()):
                 p = seg.pointN(i)
                 pts.append(QgsPoint(p.x(), p.y()))
@@ -458,6 +460,11 @@ class TraverseDock(QDockWidget):
         from qgis.core import QgsPolygon
         poly = QgsGeometry(QgsPolygon(QgsLineString(pts)))
         m = measure(poly, ref)
+        factor = fab.map_units_per_foot
+        for key in ("area", "ref_area"):
+            m[key] /= factor ** 2
+        for key in ("hausdorff", "shift"):
+            m[key] /= factor
         diff = (m["area"] - m["ref_area"]) / m["ref_area"] * 100 if m["ref_area"] else 0
         self.result_lbl.setText(self._summary(fab, self.result) + (
             "<br><b>Against the selected polygon:</b> area %.3f ac vs %.3f ac (%+.2f%%), largest offset "

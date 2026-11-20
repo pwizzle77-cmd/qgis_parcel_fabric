@@ -118,7 +118,7 @@ def quote_in_text(quote, text):
     return bool(q) and q in _norm(text)
 
 
-def number_in(value, numbers, tol=0.005):
+def number_in(value, numbers, tol=1e-9):
     return any(abs(value - n) <= tol for n in numbers)
 
 

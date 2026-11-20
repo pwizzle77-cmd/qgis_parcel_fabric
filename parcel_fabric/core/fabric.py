@@ -3,8 +3,10 @@
 
 import json
 import math
+from copy import copy
 
 from qgis.core import (
+    Qgis,
     QgsCircularString,
     QgsCompoundCurve,
     QgsDefaultValue,
@@ -20,6 +22,7 @@ from qgis.core import (
     QgsProject,
     QgsProviderRegistry,
     QgsRectangle,
+    QgsUnitTypes,
     QgsVectorLayer,
 )
 
@@ -182,6 +185,33 @@ class Fabric:
     @property
     def foot_m(self):
         return U.FOOT_DEFINITIONS.get(self.settings.get("foot", "us_survey"), U.US_SURVEY_FOOT_M)
+
+    @property
+    def map_units_per_foot(self):
+        crs = self.points.crs()
+        if not crs.isValid() or crs.isGeographic() or crs.mapUnits() == Qgis.DistanceUnit.Unknown:
+            raise ValueError("Traverse needs a projected fabric coordinate system with linear units, "
+                             "such as State Plane. Courses are entered in feet.")
+        return self.foot_m / QgsUnitTypes.fromUnitToUnitFactor(crs.mapUnits(), Qgis.DistanceUnit.Meters)
+
+    def traverse_map_legs(self, legs):
+        """Convert foot offsets to map units, anchored at the POB in fabric coordinates."""
+        factor = self.map_units_per_foot
+        if not legs or abs(factor - 1.0) < 1e-12:
+            return legs
+        x0, y0 = legs[0].start
+
+        def xy(point):
+            if point is None:
+                return None
+            return x0 + (point[0] - x0) * factor, y0 + (point[1] - y0) * factor
+
+        mapped = []
+        for leg in legs:
+            item = copy(leg)  # Keep the record azimuth carried by compass-adjusted legs.
+            item.start, item.end, item.mid, item.center = xy(leg.start), xy(leg.end), xy(leg.mid), xy(leg.center)
+            mapped.append(item)
+        return mapped
 
     @property
     def tolerance(self):
@@ -456,7 +486,8 @@ class Fabric:
         return Course(LINE, az, dist)
 
     def add_traverse(self, target, legs, record_gid, dim_source="Record", rotation=0.0, scale=1.0):
-        """Write traverse legs as lines (+ end points) in one edit."""
+        """Write foot-based traverse offsets as map-unit lines and end points in one edit."""
+        legs = self.traverse_map_legs(legs)
         lyr = self.line_layer(target)
         pts = self.points
         new_pts = []

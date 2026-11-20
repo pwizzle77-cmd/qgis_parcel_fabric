@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Fabric Settings: general, documents and parcel numbers.
+"""Fabric Settings: general, documents, parcel numbers and profile-local AI.
 
 Settings live in the fabric's QPF_Settings table, so everyone who opens the
-fabric gets the same ones.
+fabric gets the same ones. AI settings belong only to the local QGIS profile.
 """
 
 import json
@@ -129,6 +129,10 @@ class SettingsDialog(QDialog):
         nf.addRow("Parcel types that get numbers", self.num_types)
         tabs.addTab(n, "Parcel numbers")
         self._select_plss()
+
+        from .ai_settings import AISettingsWidget
+        self.ai = AISettingsWidget(self)
+        tabs.addTab(self.ai, "AI Services")
 
         mu = QWidget()
         ml = QVBoxLayout(mu)
@@ -270,6 +274,7 @@ class SettingsDialog(QDialog):
             "number_types": json.dumps(num_types if len(num_types) < len(types) else []),
         }
         try:
+            self.ai.save()
             self.fabric.save_settings(values)
         except Exception as e:
             QMessageBox.critical(self, "Fabric Settings", str(e))

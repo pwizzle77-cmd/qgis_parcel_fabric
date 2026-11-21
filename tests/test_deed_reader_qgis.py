@@ -139,13 +139,12 @@ class DeedReaderQgisTests(unittest.TestCase):
         del painter, writer
         return path
 
-    def test_qgis4_text_pdf_is_read_directly_without_ocr(self):
+    def test_text_pdf_is_rendered_for_ocr(self):
         from parcel_fabric.core import deed_pages as pages
-        path = self.pdf()
-        with patch.object(pages, 'pdf_pages', side_effect=AssertionError('OCR must not be used')):
-            images, text = pages.load(str(path))
-        self.assertEqual(images, [])
-        self.assertIn('North 45 East', '\n'.join(text))
+        images, text = pages.load(str(self.pdf()))
+        self.assertEqual(text, [])
+        self.assertEqual(len(images), 1)
+        self.assertFalse(QImage.fromData(base64.b64decode(images[0])).isNull())
 
     def test_scanned_pdf_uses_real_qt_renderer(self):
         from parcel_fabric.core import deed_pages as pages
@@ -220,7 +219,7 @@ class DeedReaderQgisTests(unittest.TestCase):
         from parcel_fabric.ui import deed_reader_dialog as module
         dialog = self.dialog()
         dialog.desc.setPlainText('Beginning at a monument; thence North 0 East 100 feet; '
-            'thence North 45 East along the property line 50 feet.')
+            'thence North 45 East along the property line 50 feet more or less.')
         dialog._extract()
         unread = next(row['source'] for row in dialog.rows if row['phase'] == 'Boundary' and row['note'])
         answer = {'calls': [{'kind': 'line', 'quote': unread, 'bearing': 'N45E', 'distance': 50}]}

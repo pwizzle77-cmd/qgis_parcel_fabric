@@ -56,11 +56,15 @@ CALL_SCHEMA = {
 }
 
 CALLS_PROMPT = (
-    "You read land surveying legal descriptions. From the TEXT below, list each boundary call in order. "
+    "You read land surveying legal descriptions and rewrite them as metes and bounds. From the TEXT "
+    "below, list each boundary course in order, one course per call. "
+    "'thence run West along the South line of the quarter a distance of 208 feet' is ONE course: "
+    "bearing West, distance 208. 'Along the south line' or 'parallel to the east line' names the line "
+    "being followed. It is not another course. If the text really does contain two courses, return both.\n"
     "For each call give:\n"
-    "- quote: the exact words of the call copied from the text\n"
+    "- quote: the exact words of that one course copied from the text\n"
     "- kind: line or curve\n"
-    "- bearing: the quadrant bearing exactly as written but in the form N 45°30'15\" E (for a curve, the "
+    "- bearing: the direction of travel as N 45°30'15\" E, or a cardinal N, S, E or W (for a curve, the "
     "chord bearing or tangent bearing that is given)\n"
     "- distance (feet) for a line; for a curve radius, and arc_length or chord_length or delta, side "
     "(left/right) and bearing_is (chord/tangent)\n"

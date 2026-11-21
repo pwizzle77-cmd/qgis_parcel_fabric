@@ -48,6 +48,24 @@ def _directions(text):
     return [(m[1][0].upper(), m.start(), m.end()) for m in CARDINAL.finditer(text)]
 
 
+def _one_course_direction(text):
+    """Direction the boundary runs.
+
+    'run West along the South line a distance of 208 feet' is one course west.
+    The other compass words name the line being followed. Two distances stay
+    two courses and are left for the caller to reject.
+    """
+    dirs = _directions(text)
+    if len(dirs) <= 1:
+        return dirs
+    if len(re.findall(rf'\b{NUMBER}\s*(?:{UNIT})\b', text, re.I)) != 1:
+        return dirs
+    before = text[:dirs[0][1]]
+    if not re.fullmatch(r'\s*(?:thence\s+)?(?:run(?:ning)?\s+)?(?:due\s+)?', before, re.I):
+        return dirs
+    return [dirs[0]]
+
+
 def _unit(text):
     value = text.lower().strip().rstrip('.')
     if value.startswith('us'):
@@ -121,9 +139,15 @@ def _call(source, phase, forced):
         annotation = re.match(r'\s*(?:all\s+distances\b|containing\s+[\d.,]+\s+acres?\b)', text, re.I)
         if ((not forced and context) or anchor or heading or annotation) and not re.search(rf'{NUMBER}\s*{UNIT}\b', text, re.I) and not QUADRANT.search(text):
             return result
+        # A caption ("Section 9 ... Township 4 South, Range 16 East") names the
+        # corner. It is not a course unless it starts with one.
+        if not re.search(rf'{NUMBER}\s*{UNIT}\b', text, re.I) and not QUADRANT.search(text):
+            course_start = r'\s*(?:thence\s+)?(?:run(?:ning)?\s+)?(?:due\s+)?(?:north|south|east|west|n|s|e|w)\b'
+            if not re.match(course_start, text, re.I) and not re.match(r'\s*thence\b', text, re.I):
+                return result
         if re.search(r'\bmore\s+or\s+less\b', text, re.I):
             raise ValueError('Approximate call; resolve the record distance manually.')
-        directions = _directions(text)
+        directions = _one_course_direction(text)
         if not directions:
             raise ValueError('No explicit bearing found; supply the missing call or enter it manually.')
         if len(directions) != 1:
@@ -138,8 +162,15 @@ def _call(source, phase, forced):
                 distance = re.search(rf'\b(?:a\s+)?distance\s+of\s+({NUMBER})(?!\d|\.\d)\s*(?:({UNIT})(?![a-z]))?', text[end:], re.I)
                 if distance:
                     prefix = text[end:end + distance.start()]
-                    if not re.match(r'\s*,?\s*along\b', prefix, re.I) or re.search(rf'{NUMBER}\s*{UNIT}\b', prefix, re.I):
+                    monument = r'\s*,?\s*(?:along|parallel|with|following|on)\b'
+                    buried = re.search(rf'{NUMBER}\s*{UNIT}\b', prefix, re.I)
+                    if not re.match(monument, prefix, re.I) or buried:
                         raise ValueError('Ambiguous wording between bearing and distance; separate or clarify the call.')
+            if not distance:
+                # 'along the property line 50 feet' never says 'distance of'
+                distance = re.search(
+                    rf'\b(?:along|parallel)\b(?:(?!\bthence\b).){{0,400}}?({NUMBER})(?!\d|\.\d)\s*({UNIT})(?![a-z])',
+                    text[end:], re.I)
             if not distance:
                 raise ValueError('No distance immediately after the bearing; use bearing, distance feet/meters.')
             remainder = text[end + distance.end():]
@@ -174,8 +205,13 @@ def parse_description(text, boundary_only=False):
         pob = POB.search(text, commence.end())
         if not pob:
             return [LegalCall(text, issue='Commencement found without an explicit point of beginning. Supply the POB or paste boundary calls only.')]
-        if re.search(r'\bthence\b', text[pob.end():], re.I) or QUADRANT.search(text[pob.end():]) or CARDINAL.search(text[pob.end():]):
-            parts = [('Commencement', text[:pob.end()]), ('Boundary', text[pob.end():])]
+        after = text[pob.end():]
+        between = text[commence.end():pob.start()]
+        if re.search(r'\bthence\b', after, re.I) or QUADRANT.search(after) or CARDINAL.search(after):
+            parts = [('Commencement', text[:pob.end()]), ('Boundary', after)]
+        elif len(re.findall(r'\bthence\b', between, re.I)) >= 2:
+            # "For a point of beginning, commence at the corner, thence ... to the POB."
+            parts = [('Boundary', text)]
         else:
             ambiguity = ('Commence is followed only by a closing Point of Beginning. '
                          'If all calls form the parcel boundary, select “All calls are boundary” and extract again; '

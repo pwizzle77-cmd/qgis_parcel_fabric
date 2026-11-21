@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.8.6, experimental.** Test it on a copy of real data before
+**Status: 0.8.7, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.8.6.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.8.7.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -40,8 +40,9 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    chord, delta or tangent length, and say whether the bearing is the chord,
    tangent, radial, or tangent to the previous course. **Paste description...**
    uses COGO Workbench's parser and review step. The panel shows misclose, ratio
-   and area live; Compass rule adjustment is optional. **Create lines** writes
-   COGO-attributed lines (true arcs) and corner points, and can build the parcel.
+   and area live; Compass rule adjustment is optional. **Preview** puts the
+   lines, points and parcel on the map without saving. **Save** writes them.
+   **Clear** throws that preview away and leaves the courses. The lines are COGO-attributed true arcs.
    Start X/Y are in the fabric CRS. Traverse converts course offsets from the
    selected foot definition to the fabric's linear map units, so meter-based
    fabrics draw at the correct size too. Record COGO dimensions, closure and

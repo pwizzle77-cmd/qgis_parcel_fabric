@@ -242,12 +242,15 @@ class RecordsDock(QDockWidget):
         box.setWindowTitle("Remove mistake")
         box.setText("Remove what \"%s\" did?\n\n%s\n\nThe scan stays in the document folder. "
                     "This cannot be undone." % (name, summary(planned)))
-        box.setCheckBox(QCheckBox("Also delete the record"))
+        # Parent it. A checkbox with no owner is destroyed before the dialog opens
+        # and Qt then crashes with "access violation - no rtti data".
+        check = QCheckBox("Also delete the record", box)
+        box.setCheckBox(check)
         box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
         box.button(QMessageBox.StandardButton.Ok).setText("Remove")
         if box.exec() != QMessageBox.StandardButton.Ok:
             return
-        drop = box.checkBox().isChecked()
+        drop = check.isChecked()
         try:
             done = apply(fab, gid, drop)
         except MistakeError as exc:

@@ -70,6 +70,30 @@ class FabricTests(_Base):
         self.assertEqual(self.fab.parcels.name(), "Parcels")
         self.assertEqual(len(Fabric.from_project()), 1)
 
+    def test_preview_traverse_discards_lines_points_and_parcel(self):
+        from parcel_fabric.core.fabric import EditSession
+        res = C.compute((X0, Y0), courses(("N 0 E", 100), ("N 90 E", 200),
+                                          ("S 0 E", 100), ("S 90 W", 200)))
+        lines, pts, parcels = self.fab.lines, self.fab.points, self.fab.parcels
+        with EditSession([lines, pts, parcels, self.fab.records], "Traverse", commit=False) as ed:
+            self.fab.add_traverse("Tax", res.legs, self.rec, session=ed)
+            rep = build_parcels(self.fab, "Tax", self.rec, session=ed)
+        self.assertEqual(rep.created, 1, rep.issues)
+        self.assertTrue(lines.isEditable())
+        self.assertEqual(sum(1 for _ in parcels.getFeatures()), 1)
+        for lx, mark in ed.marks:
+            stack = lx.undoStack()
+            while stack is not None and lx.isEditable() and stack.index() > mark:
+                stack.undo()
+        for lx in ed.held:
+            stack = lx.undoStack()
+            if lx.isEditable() and (stack is None or stack.index() == 0):
+                lx.rollBack()
+        self.assertFalse(lines.isEditable())
+        self.assertEqual(sum(1 for _ in lines.getFeatures()), 0)
+        self.assertEqual(sum(1 for _ in pts.getFeatures()), 0)
+        self.assertEqual(sum(1 for _ in parcels.getFeatures()), 0)
+
     def test_square_builds_one_parcel_with_points(self):
         self.traverse("Tax", courses(("N 0 E", 100), ("N 90 E", 200), ("S 0 E", 100), ("S 90 W", 200)))
         rep = build_parcels(self.fab, "Tax", self.rec)
@@ -376,10 +400,10 @@ class Phase2Tests(_Base):
     def test_split_can_be_cleared(self):
         from qgis.core import QgsGeometry, QgsPointXY
         from parcel_fabric.core import edits as E
-        from parcel_fabric.core.clear import apply_clear, plan_clear
+        from parcel_fabric.core import mistake as M
         cut = QgsGeometry.fromPolylineXY([QgsPointXY(X0 + 80, Y0 - 20), QgsPointXY(X0 + 80, Y0 + 120)])
         E.cut_parcel(self.fab, self.parent, [cut], self.rec2)
-        apply_clear(self.fab, plan_clear(self.fab, self.rec2))
+        M.apply(self.fab, self.rec2, False)
         self.assertEqual([f["GlobalID"] for f in self.current()], [self.parent["GlobalID"]])
         self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 4)
         self.assertEqual(sum(1 for _ in self.fab.points.getFeatures()), 4)

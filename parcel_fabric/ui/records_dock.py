@@ -48,10 +48,16 @@ class RecordsDock(QDockWidget):
         ar.addWidget(clear)
         lay.addLayout(ar)
 
+        find = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Find a record...")
         self.search.textChanged.connect(self._filter)
-        lay.addWidget(self.search)
+        self.unmapped = QCheckBox("Not mapped yet")
+        self.unmapped.setToolTip("Filed records that do not have parcels yet")
+        self.unmapped.toggled.connect(lambda *_: self._filter(self.search.text()))
+        find.addWidget(self.search, 1)
+        find.addWidget(self.unmapped)
+        lay.addLayout(find)
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["Name", "Type", "Book", "Page", "Recorded", "Parcels"])
@@ -67,9 +73,7 @@ class RecordsDock(QDockWidget):
         for row in [
             [("New Record...", self._new_record, "Create a record for a plat, deed or survey"),
              ("Edit...", self._edit_record, "Correct the record's name, type, book, page, document..."),
-             ("Set Active", self._activate, "New lines and parcels will belong to this record"),
-             ("Remove Mistake...", self._clear_record,
-              "Delete every line, point and parcel this record created (the record itself stays)")],
+             ("Set Active", self._activate, "New lines and parcels will belong to this record")],
             [("Zoom To", self._zoom, "Zoom to the record's parcels"),
              ("Document", self._open_doc, "Open the record's scanned document"),
              ("Closure Report...", self._closure_report, "Every course, misclose and area for the record's parcels"),
@@ -82,6 +86,11 @@ class RecordsDock(QDockWidget):
                 b.clicked.connect(slot)
                 hb.addWidget(b)
             lay.addLayout(hb)
+
+        mistake = QPushButton("Remove mistake...")
+        mistake.setToolTip("Roll back this record when a later record has not used its parcels, lines or points")
+        mistake.clicked.connect(self._remove_mistake)
+        lay.addWidget(mistake)
 
         b2 = QHBoxLayout()
         b2.addWidget(QLabel("Build"))
@@ -133,7 +142,8 @@ class RecordsDock(QDockWidget):
             self._watched = None
         self.type_combo.clear()
         enabled = fab is not None
-        for wdg in (self.table, self.build_rec, self.build_ext, self.type_combo, self.search):
+        for wdg in (self.table, self.build_rec, self.build_ext, self.type_combo, self.search,
+                    self.unmapped):
             wdg.setEnabled(enabled)
         if fab is None:
             self.table.setRowCount(0)
@@ -151,7 +161,10 @@ class RecordsDock(QDockWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         active = self.manager.active_record_id
+        waiting = 0
         for f in fab.records.getFeatures(QgsFeatureRequest()):
+            if int(f["ParcelCount"] or 0) == 0:
+                waiting += 1
             r = self.table.rowCount()
             self.table.insertRow(r)
             name = QTableWidgetItem(str(f["Name"] or ""))
@@ -170,15 +183,28 @@ class RecordsDock(QDockWidget):
                                     QTableWidgetItem(dtxt), cnt]):
                 self.table.setItem(r, c, it)
         self.table.setSortingEnabled(True)
+        self.unmapped.setText("Not mapped yet (%d)" % waiting)
         self._filter(self.search.text())
         self._update_active()
 
     def _filter(self, text):
         t = text.lower().strip()
+        only_waiting = self.unmapped.isChecked()
         for r in range(self.table.rowCount()):
             hit = not t or any(t in (self.table.item(r, c).text().lower())
                                for c in range(self.table.columnCount()) if self.table.item(r, c))
+            if only_waiting and self._parcel_count(r) != 0:
+                hit = False
             self.table.setRowHidden(r, not hit)
+
+    def _parcel_count(self, row):
+        item = self.table.item(row, 5)
+        if item is None:
+            return 0
+        try:
+            return int(item.data(Qt.ItemDataRole.DisplayRole) or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def _update_active(self):
         fab = self.manager.active
@@ -186,15 +212,58 @@ class RecordsDock(QDockWidget):
             return
         rec = self.manager.active_record()
         if rec is None:
-            self.active_lbl.setText("Active record: none")
+            self.active_lbl.setText("Active record: none. Set one when you are ready to map.")
         else:
-            self.active_lbl.setText("Active record: %s" % (rec["Name"] or rec["GlobalID"]))
+            self.active_lbl.setText("Active record: %s. New lines and parcels belong to it." % (
+                rec["Name"] or rec["GlobalID"]))
 
     def _selected_gid(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return None
         return self.table.item(rows[0].row(), 0).data(GID_ROLE)
+
+    def _remove_mistake(self):
+        fab = self.manager.active
+        gid = self._selected_gid()
+        if fab is None or not gid:
+            QMessageBox.information(self, "Remove mistake", "Select the record that was entered by mistake.")
+            return
+        from ..core.mistake import MistakeError, apply, preview, summary
+        try:
+            planned = preview(fab, gid)
+        except MistakeError as exc:
+            QMessageBox.warning(self, "Remove mistake", str(exc))
+            return
+        rec = fab.record_by_id(gid)
+        name = (rec["Name"] if rec is not None else "") or gid
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Remove mistake")
+        box.setText("Remove what \"%s\" did?\n\n%s\n\nThe scan stays in the document folder. "
+                    "This cannot be undone." % (name, summary(planned)))
+        # Parent it. A checkbox with no owner is destroyed before the dialog opens
+        # and Qt then crashes with "access violation - no rtti data".
+        check = QCheckBox("Also delete the record", box)
+        box.setCheckBox(check)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Ok).setText("Remove")
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            return
+        drop = check.isChecked()
+        try:
+            done = apply(fab, gid, drop)
+        except MistakeError as exc:
+            QMessageBox.warning(self, "Remove mistake", str(exc))
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "Remove mistake", str(exc))
+            return
+        if drop and gid == self.manager.active_record_id:
+            self.manager.set_active_record(None)
+        self.iface.mapCanvas().refresh()
+        self._fill()
+        self.iface.messageBar().pushSuccess("Parcel Fabric", summary(done))
 
     # ------------------------------------------------------------------
     def _new_record(self):
@@ -244,44 +313,6 @@ class RecordsDock(QDockWidget):
         _dates(fab, [gid])          # a changed recorded date moves the history
         self._fill()
         self._update_active()
-
-    def _clear_record(self):
-        from ..core.clear import apply_clear, plan_clear
-        fab = self.manager.active
-        gid = self._selected_gid()
-        rec = fab.record_by_id(gid) if fab and gid else None
-        if rec is None:
-            QMessageBox.information(self, "Remove Mistake", "Select the record in the list first.")
-            return
-        try:
-            plan = plan_clear(fab, gid)
-            gone, back = plan.counts(plan.delete), plan.counts(plan.restore)
-            if not gone and not back:
-                QMessageBox.information(self, "Remove Mistake", "That record has nothing to clear." + (
-                    " %d shared feature(s) stay." % plan.kept if plan.kept else ""))
-                return
-            text = "Permanently delete from record '%s':\n%s.\n" % (rec["Name"] or gid, gone or "nothing")
-            if back:
-                text += "\nBrought back (this record had retired them):\n%s.\n" % back
-            if plan.kept:
-                text += "\n%d line(s)/point(s) stay because other parcels use them.\n" % plan.kept
-            text += "\nThe record itself stays. This can't be undone. Continue?"
-            if QMessageBox.question(
-                    self, "Remove Mistake", text,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
-                return
-            apply_clear(fab, plan)
-        except Exception as e:
-            msg = str(e)
-            if "retired features are history" in msg:
-                msg += "\n\nThe Multi-user database rules (Fabric Settings) don't allow deleting."
-            QMessageBox.critical(self, "Remove Mistake", msg)
-            return
-        self.iface.mapCanvas().refreshAllLayers()
-        self._fill()
-        self.iface.messageBar().pushSuccess("Parcel Fabric", "Cleared record '%s': %s removed." % (
-            rec["Name"] or gid, gone or "nothing"))
 
     def _open_doc(self):
         fab = self.manager.active

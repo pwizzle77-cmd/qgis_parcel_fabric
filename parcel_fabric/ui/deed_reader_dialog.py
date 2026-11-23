@@ -238,9 +238,9 @@ class DeedReaderDialog(QDialog):
             return deed_pages.load(path, dpi)
 
         def loaded(result):
-            images, text_pages = result
-            if text_pages:
-                done(("text", text_pages))
+            images, _text = result
+            if not images:
+                self.status.setText("Couldn't render the deed pages for the vision model.")
                 return
             client = self._client()
             if client is None:
@@ -253,17 +253,16 @@ class DeedReaderDialog(QDialog):
                         raise RuntimeError("Cancelled")
                     task.setProgress(100.0 * i / max(1, len(images)))
                     out.append(client.chat(model, A.ocr_prompt(model), [img]))
-                return "ocr", out
+                return out
+
+            def done(pages):
+                text = "\n\n".join("----- page %d -----\n%s" % (i + 1, t.strip()) for i, t in enumerate(pages))
+                self.deed_text.setPlainText(text)
+                self.status.setText("Read %d page(s) with %s. Check the text, then Find Description." % (
+                    len(pages), model))
+                self._find()
 
             self._run("Reading pages with %s" % model, ocr, done)
-
-        def done(result):
-            how, pages = result
-            text = "\n\n".join("----- page %d -----\n%s" % (i + 1, t.strip()) for i, t in enumerate(pages))
-            self.deed_text.setPlainText(text)
-            self.status.setText("Read %d page(s) %s. Check the text, then Find Description." % (
-                len(pages), "from the PDF's text layer" if how == "text" else "with " + model))
-            self._find()
 
         self._run("Reading %s" % os.path.basename(path), work, loaded)
 
@@ -419,17 +418,19 @@ class DeedReaderDialog(QDialog):
                 for call in (answers[0] or {}).get("calls", []):
                     self.rows.append(self._ai_row(call, desc))
             else:
-                for i, ans in zip(targets, answers):
+                # Walk backward so a clause that becomes several courses does not shift the rest.
+                for i, ans in reversed(list(zip(targets, answers))):
                     calls = (ans or {}).get("calls", [])
-                    if len(calls) != 1:
-                        self.rows[i]["note"] = "AI found %d calls in this clause - split the clause or fix it by hand" \
-                            % len(calls)
+                    if not calls:
+                        self.rows[i]["note"] = "AI found no call in this clause. Split it, or type the course."
                         continue
-                    new = self._ai_row(calls[0], self.rows[i]["source"])
-                    if new["course"] is not None:
-                        self.rows[i].update(course=new["course"], by="AI", note="")
+                    built = [self._ai_row(c, self.rows[i]["source"]) for c in calls]
+                    if len(built) == 1 and built[0]["course"] is not None:
+                        self.rows[i].update(course=built[0]["course"], by="AI", note="")
+                    elif len(built) == 1:
+                        self.rows[i]["note"] = built[0]["note"]
                     else:
-                        self.rows[i]["note"] = "AI answer rejected: " + new["note"]
+                        self.rows[i:i + 1] = built
             self._show_rows()
 
         self._run("Asking %s about %d clause(s)" % (model, len(sources)), work, done)

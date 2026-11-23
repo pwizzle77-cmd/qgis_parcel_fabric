@@ -118,7 +118,7 @@ def _ring_from(lines, chain):
 
 
 def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle = None,
-                  new_record=None, number=True, adopt=None, within=None):
+                  new_record=None, number=True, adopt=None, within=None, session=None):
     """Build parcels of one type.
 
     ``new_record`` stamps new parcels (default: the build's record).
@@ -298,7 +298,8 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
     # ---- write everything as one edit ----------------------------------------
     if not (new_feats or updates or new_pts):
         return rep
-    with EditSession([parcel_lyr, fabric.points, fabric.records], "Build parcels") as ed:
+
+    def write(ed):
         for fid, geom, vals in updates:
             ed.set_geometry(parcel_lyr, fid, geom)
             for k, v in vals.items():
@@ -309,6 +310,13 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
             ed.add(fabric.points, p)
         if record_gid:
             update_record_footprint(fabric, record_gid, ed)
+
+    if session is not None:
+        # Caller saves or discards. History dates commit the parcel layer, so they wait.
+        write(session)
+        return rep
+    with EditSession([parcel_lyr, fabric.points, fabric.records], "Build parcels") as ed:
+        write(ed)
     _dates(fabric, [record_gid, new_record])
     return rep
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Traverse: enter record courses, check closure, save good ones to the active record.
 
-Courses are only a preview on the map until they pass and are saved.
+Preview puts the lines, points and parcel in an unsaved edit; Save keeps it when the traverse is good.
 """
 
 import math
@@ -60,6 +60,10 @@ class TraverseDock(QDockWidget):
         self.marker.hide()
         self.tool = PickPointTool(self.canvas, lambda: self.manager.active)
         self.tool.picked.connect(self._picked)
+        self._staged = None             # the unsaved preview (an open EditSession)
+        self._staged_why = ""           # why that preview can't be saved
+        self._staged_sig = None         # what it was made from
+        self._staged_rec = None
 
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -104,12 +108,16 @@ class TraverseDock(QDockWidget):
         lay.addWidget(self.table, 1)
 
         rowb = QHBoxLayout()
-        for text, slot in [("Add line", lambda: self._add_row("Line")),
-                           ("Add curve", lambda: self._add_row("Curve")),
-                           ("Delete", self._delete_rows), ("Clear", self._clear),
-                           ("Paste description...", self._paste),
-                           ("Read Deed (AI)...", self._read_deed)]:
+        for text, slot, tip in (
+                ("Add line", lambda: self._add_row("Line"), ""),
+                ("Add curve", lambda: self._add_row("Curve"), ""),
+                ("Delete", self._delete_rows, ""),
+                ("Clear", self._clear, "Throw away the preview. The courses stay so you can adjust them"),
+                ("Paste description...", self._paste, ""),
+                ("Read Deed (AI)...", self._read_deed, "")):
             b = QPushButton(text)
+            if tip:
+                b.setToolTip(tip)
             b.clicked.connect(slot)
             rowb.addWidget(b)
         lay.addLayout(rowb)
@@ -139,14 +147,18 @@ class TraverseDock(QDockWidget):
         lay.addWidget(self.result_lbl)
 
         cr = QHBoxLayout()
-        self.build_after = QCheckBox("Build parcel after saving")
+        self.build_after = QCheckBox("Build parcel in the preview")
         self.build_after.setChecked(True)
-        self.save_btn = QPushButton("Save to Record")
-        self.save_btn.setToolTip("Write the lines and points to the active record. Available once the "
-                                 "traverse is good; until then it is only a preview.")
-        self.save_btn.setDefault(True)
+        self.build_after.setToolTip("The parcel is previewed with the lines and points, and saved with them")
+        create = QPushButton("Preview")
+        create.setToolTip("Put the lines, points and parcel on the map without saving")
+        create.setDefault(True)
+        create.clicked.connect(self._create)
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setToolTip("Save the previewed lines, points and parcels to the active record. "
+                                 "Available when the traverse is good.")
         self.save_btn.setEnabled(False)
-        self.save_btn.clicked.connect(self._create)
+        self.save_btn.clicked.connect(self._save)
         cmp_btn = QPushButton("Compare to Selected Polygon")
         cmp_btn.setToolTip("How well this traverse fits the polygon selected in the active layer "
                            "(e.g. the existing county parcel)")
@@ -154,6 +166,7 @@ class TraverseDock(QDockWidget):
         cr.addWidget(self.build_after)
         cr.addStretch(1)
         cr.addWidget(cmp_btn)
+        cr.addWidget(create)
         cr.addWidget(self.save_btn)
         lay.addLayout(cr)
         sr = QHBoxLayout()
@@ -182,6 +195,10 @@ class TraverseDock(QDockWidget):
 
     # ------------------------------------------------------------------
     def cleanup(self):
+        try:
+            self._discard_preview()
+        except RuntimeError:            # the layers went with the project
+            pass
         for item in (self.band, self.gap, self.marker):
             self.canvas.scene().removeItem(item)
         if self.canvas.mapTool() is self.tool:
@@ -278,9 +295,28 @@ class TraverseDock(QDockWidget):
         self.use_tie.setChecked(bool(self.tie))
 
     def _clear(self):
-        self._set_tie([])
-        self.table.setRowCount(0)
-        self._add_row("Line")
+        had = self._staged is not None
+        self._discard_preview()
+        if had:
+            self.canvas.refresh()
+
+    def _discard_preview(self):
+        """Undo the unsaved traverse and leave layers we opened."""
+        staged = self._staged
+        if staged is None:
+            return
+        self._staged = None
+        self.save_btn.setEnabled(False)
+        for lx, mark in staged.marks:
+            if not lx.isEditable():
+                continue
+            stack = lx.undoStack()
+            while stack is not None and stack.index() > mark:
+                stack.undo()
+        for lx in staged.held:
+            stack = lx.undoStack()
+            if lx.isEditable() and (stack is None or stack.index() == 0):
+                lx.rollBack()
 
     def _text(self, r, c):
         it = self.table.item(r, c)
@@ -365,7 +401,7 @@ class TraverseDock(QDockWidget):
     def _recompute(self):
         fab = self.manager.active
         self.result = None
-        self.save_btn.setEnabled(False)
+        self._sync_save()
         self.split_btn.setEnabled(False)
         self.band.reset(Qgis.GeometryType.Line)
         self.gap.reset(Qgis.GeometryType.Line)
@@ -405,11 +441,25 @@ class TraverseDock(QDockWidget):
             self.result_lbl.setText("<span style='color:#b3261e'>%s</span>" % e)
             return
         self.result = res
-        self.save_btn.setEnabled(not why)
+        self._sync_save()
         self.split_btn.setEnabled(not why and self.closed.isChecked())
         self.result_lbl.setText(self._summary(fab, res) + (
-            "<br><span style='color:#b3261e'>Preview only, can't be saved: %s</span>" % why if why
-            else "<br>Preview only until you press Save to Record."))
+            "<br><span style='color:#b3261e'>Can't be saved: %s</span>" % why if why
+            else "<br>Good. Preview it, then Save."))
+
+    def _signature(self):
+        """Everything a preview is made from, to tell when it is out of date."""
+        rows = [tuple(self._text(r, c) for c in (COL_BEARING, COL_VALUE, COL_RADIUS)) + tuple(
+            self.table.cellWidget(r, c).currentData() for c in (COL_TYPE, COL_SIDE, COL_CURVE_BY, COL_DIR))
+            for r in range(self.table.rowCount())]
+        return ([r for r in rows if any(r[:3])], self.x.text(), self.y.text(), self.use_tie.isChecked(),
+                self.closed.isChecked(), self.adjust.currentData(), self.target.currentText(),
+                self.dimsrc.currentText(), self.build_after.isChecked(), self.manager.active_record_id,
+                self._record_g2g())
+
+    def _sync_save(self):
+        self.save_btn.setEnabled(self._staged is not None and not self._staged_why
+                                 and self._staged_sig == self._signature())
 
     def _final(self, res, start):
         """The traverse as it would be saved (compass rule applied if chosen)."""
@@ -572,50 +622,90 @@ class TraverseDock(QDockWidget):
                 U.azimuth_to_bearing(m["shift_az"]) if m["shift"] > 0.005 else "", m["overlap"] * 100)))
 
     def _create(self):
+        """Preview: put the lines, points and parcel on the map in an edit that isn't saved."""
         fab = self.manager.active
         if fab is None:
             return
+        self._discard_preview()         # its own points must not count as fabric points below
         self._recompute()
         if self.result is None:
             QMessageBox.warning(self, "Traverse", "Fix the start point and courses first.")
             return
-        start = self._start()
-        res = self.result
-        why = self._blocker(fab, res, start)
-        if why:
-            QMessageBox.warning(self, "Traverse", "This traverse can't be saved: " + why)
-            return
         rec = self.manager.active_record_id
+        if self.manager.active_record() is None:
+            QMessageBox.information(self, "Traverse", "Set an active record first (Records panel), so the lines "
+                                    "belong to a plat or deed.")
+            return
+        start = self._start()
+        why = self._blocker(fab, self.result, start)
+        final = self._final(self.result, start)
         scale, rot = self._record_g2g()
-        final = self._final(res, start)
         target = self.target.currentText()
-        build = self.build_after.isChecked() and self.closed.isChecked() and target in fab.parcel_types
+        building = self.build_after.isChecked() and self.closed.isChecked() and target in fab.parcel_types
+        layers = [fab.line_layer(target), fab.points]
+        if building:
+            layers = [fab.parcels] + layers + [fab.records]      # the layer likeliest to be refused saves first
         rep = None
         try:
-            # one edit: if the parcel can't be built, the lines and points aren't kept either
-            with EditSession([fab.parcels, fab.line_layer(target), fab.points, fab.records], "Save traverse"):
+            with EditSession(layers, "Traverse", commit=False) as ed:
                 n_lines, n_pts = fab.add_traverse(target, final.legs, rec, self.dimsrc.currentText(),
-                                                  math.radians(rot), scale)
-                if build:
-                    rep = build_parcels(fab, target, rec)
-                    self._check_build(fab, final, rep)
-            _dates(fab, [rec])
+                                                  math.radians(rot), scale, session=ed)
+                if building:
+                    rep = build_parcels(fab, target, rec, session=ed)
         except Exception as e:
-            QMessageBox.critical(self, "Traverse", "Nothing was saved: %s" % e)
-            if rep is not None and rep.issues:
-                IssuesDialog(self.iface, "Build %s" % target, rep.summary(), rep.issues,
-                             fab.records.crs()).show()
-            self.canvas.refresh()
+            QMessageBox.critical(self, "Traverse", "Could not preview the traverse: %s" % e)
             return
-        msg = "%d line(s) and %d point(s) saved to %s." % (n_lines, n_pts, target)
+        if rep is not None and not why:
+            why = self._build_problem(fab, final, rep)
+        self._staged, self._staged_why = ed, why
+        self._staged_sig, self._staged_rec = self._signature(), rec
+        self._sync_save()
+        msg = "%d line(s) and %d point(s) previewed on %s. Not saved." % (n_lines, n_pts, target)
         if rep is not None:
-            msg += " Build: " + rep.summary()
+            msg += " " + rep.summary()
             if rep.issues:
                 IssuesDialog(self.iface, "Build %s" % target, rep.summary(), rep.issues,
                              fab.records.crs()).show()
-        self._clear()           # saving the same courses twice would duplicate the lines
-        self.iface.messageBar().pushSuccess("Parcel Fabric", msg)
         self.canvas.refresh()
+        self.band.reset(Qgis.GeometryType.Line)
+        self.gap.reset(Qgis.GeometryType.Line)
+        if why:
+            self.iface.messageBar().pushWarning("Parcel Fabric", msg + " It can't be saved: %s Clear throws it away "
+                                                "and leaves the courses." % why)
+        else:
+            self.iface.messageBar().pushSuccess(
+                "Parcel Fabric", msg + " Save keeps them. Clear throws them away and leaves the courses.")
+
+    def _save(self):
+        staged = self._staged
+        fab = self.manager.active
+        self._sync_save()
+        if staged is None or fab is None or not self.save_btn.isEnabled():
+            QMessageBox.information(self, "Traverse", "Preview a good traverse first. Save writes that preview."
+                                    + (" " + self._staged_why if staged is not None else ""))
+            return
+        errors = []
+        for lx in staged.held:
+            if not lx.isEditable():
+                continue
+            if errors:
+                lx.rollBack()           # one layer failed: don't save the rest without it
+            elif not lx.commitChanges():
+                errors.append("%s: %s" % (lx.name(), "; ".join(lx.commitErrors())))
+                lx.rollBack()
+        left = [lx.name() for lx, _mark in staged.marks
+                if lx not in staged.held and lx.isEditable()]
+        self._staged = None
+        self._sync_save()
+        self.canvas.refresh()
+        if errors:
+            QMessageBox.critical(self, "Traverse", "Save failed - " + " | ".join(errors))
+            return
+        _dates(fab, [self._staged_rec])
+        msg = "Traverse saved."
+        if left:
+            msg += " %s already had edits, so Save left those layers open." % ", ".join(left)
+        self.iface.messageBar().pushSuccess("Parcel Fabric", msg)
 
     def _split(self):
         fab = self.manager.active
@@ -629,6 +719,7 @@ class TraverseDock(QDockWidget):
             QMessageBox.information(self, "Split Parcel", "Select ONE parcel in the fabric's Parcels layer: the "
                                     "parent this deed conveys land out of. It must already be in the fabric.")
             return
+        self._discard_preview()
         parent = sel[0]
         start = self._start()
         scale, rot = self._record_g2g()
@@ -665,19 +756,19 @@ class TraverseDock(QDockWidget):
             QMessageBox.critical(self, title, "Nothing was saved: %s" % e)
             return
         fab.parcels.removeSelection()
-        self._clear()
         self.canvas.refresh()
         if res.issues:
             IssuesDialog(self.iface, title, res.summary(), res.issues, fab.records.crs()).show()
         else:
             self.iface.messageBar().pushSuccess("Parcel Fabric", "Split: " + res.summary())
 
-    def _check_build(self, fab, res, rep):
+    def _build_problem(self, fab, res, rep):
+        """Why the previewed parcel isn't good ('' when it built)."""
         ring = self._map_points(fab, fab.traverse_map_legs(res.legs))
         ring[-1] = ring[0].clone()
         poly = QgsGeometry(QgsPolygon(QgsLineString(ring)))
         bad = [i for i in rep.issues if i.severity == "error" and i.x is not None
                and poly.contains(QgsGeometry.fromPointXY(QgsPointXY(i.x, i.y)))]
-        if bad or not (rep.created or rep.rebuilt or rep.seeds_used):
-            raise EditError("the parcel couldn't be built. %s To save the lines without a parcel, untick "
-                            "Build parcel after saving." % (bad[0].message if bad else ""))
+        if not bad and (rep.created or rep.rebuilt or rep.seeds_used):
+            return ""
+        return "the parcel couldn't be built. %s" % (bad[0].message if bad else "")

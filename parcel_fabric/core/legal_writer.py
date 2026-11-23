@@ -113,7 +113,16 @@ def find_arcs(ring, tol=0.02, min_points=4, max_seg=None):
     that was densified into vertices) back into true arcs.
 
     ``tol`` is how far (in map units) a vertex may sit off the circle.
+    A closed circle becomes two arcs, because one course cannot be 360 degrees.
     """
+    circle = _closed_circle(ring, tol, min_points)
+    if circle is not None:
+        return circle
+    if ring:
+        # a rounded corner cut by the ring's start/end join is one run once the
+        # join sits on the longest straight course
+        start = (max(range(len(ring)), key=lambda i: _len(ring[i])) + 1) % len(ring)
+        ring = rotate_to(ring, start)
     out = []
     i = 0
     n = len(ring)
@@ -156,7 +165,45 @@ def _on_one_circle(pts, tol):
             signs.add(cross > 0)
     if len(signs) != 1:
         return False
-    return all(abs(math.hypot(p[0] - cx, p[1] - cy) - r) <= tol for p in pts)
+    if any(abs(math.hypot(p[0] - cx, p[1] - cy) - r) > tol for p in pts):
+        return False
+    # shortcut: a chord bowing more than max(0.5, tol) stays straight, so a
+    # rectangle's corners are not a curve; upgrade if a real fillet is coarser
+    return all(_short_chord(r, a, b, tol) for a, b in zip(pts, pts[1:]))
+
+
+def _short_chord(r, a, b, tol):
+    half = math.hypot(b[0] - a[0], b[1] - a[1]) / 2.0
+    if half >= r:
+        return False
+    bow = r - math.sqrt(r * r - half * half)
+    return bow <= max(0.5, tol)
+
+
+def _closed_circle(ring, tol, min_points):
+    """Two semicircle-ish arcs when every vertex of a closed ring is one circle."""
+    if len(ring) < min_points or any(s[0] != "line" for s in ring):
+        return None
+    end, start = _end(ring[-1]), _start(ring[0])
+    if math.hypot(end[0] - start[0], end[1] - start[1]) > 1e-4:
+        return None
+    pts = [_start(s) for s in ring]
+    if not _on_one_circle(pts, tol):
+        return None
+    (cx, cy), r = G.arc_center(pts[0], pts[len(pts) // 2], pts[-1])
+    if not _short_chord(r, pts[-1], pts[0], tol):
+        return None
+    angs = [math.atan2(p[1] - cy, p[0] - cx) for p in pts]
+    wind = 0.0
+    for a, b in zip(angs, angs[1:] + angs[:1]):
+        wind += (b - a + math.pi) % TWO_PI - math.pi
+    if abs(abs(wind) - TWO_PI) > 0.2:
+        return None
+    h = len(pts) // 2
+    return [
+        ("arc", pts[0], pts[h // 2], pts[h]),
+        ("arc", pts[h], pts[h + (len(pts) - h) // 2], pts[0]),
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -170,11 +217,15 @@ def _d(x, dec):
     return ("{:,.%df}" % dec).format(x)
 
 
+def _num(text):
+    return float(text.replace(",", ""))
+
+
 def concave_word(seg):
     """'concave Southeasterly' style word for which way the curve opens."""
     c, _r, _a0, _sw = G.arc_sweep(*seg[1:])
-    m = ((seg[1][0] + seg[3][0]) / 2.0, (seg[1][1] + seg[3][1]) / 2.0)
-    az = G.chord_azimuth(m, c)
+    # through the arc point: at 180 degrees the chord midpoint is the centre
+    az = G.chord_azimuth(seg[2], c)
     return COMPASS8[int(((math.degrees(az) + 22.5) % 360) // 45)] + "erly"
 
 
@@ -199,20 +250,48 @@ def describe_course(seg, prev, unit="feet", sec_dec=0, dist_dec=2, tangent_tol_s
     if seg[0] == "line":
         az, dist = U.inverse(seg[1][0], seg[1][1], seg[2][0], seg[2][1])
         return "%s, a distance of %s %s" % (_b(az, sec_dec), _d(dist, dist_dec), unit)
-    c, r, a0, sw = G.arc_sweep(*seg[1:])
+    sweep = G.arc_sweep(*seg[1:])
+    r, sw = sweep[1], sweep[3]
     side = "left" if sw > 0 else "right"
-    delta = math.degrees(abs(sw))
-    arc = abs(sw) * r
-    caz, chord = U.inverse(seg[1][0], seg[1][1], seg[3][0], seg[3][1])
+    # State the true central angle. Add arc decimals until arc/radius agrees
+    # with it within one second, which is as tight as the reader allows.
+    r_txt = _d(r, dist_dec)
+    rv = _num(r_txt)
+    deg, minute, sec = U.deg_to_dms(math.degrees(abs(sw)), sec_dec)
+    target = deg + minute / 60.0 + sec / 3600.0
+    arc_txt = _arc_text(rv * math.radians(target) if rv else abs(sw) * r, rv, target, dist_dec)
+    delta = (_num(arc_txt) / rv) if rv else abs(sw)
+    chord = 2.0 * rv * math.sin(delta / 2.0) if rv else 0.0
+    caz = U.inverse(seg[1][0], seg[1][1], seg[3][0], seg[3][1])[0]
     tangent = ""
     if prev is not None:
         diff = abs((tangent_in(seg) - tangent_out(prev) + math.pi) % TWO_PI - math.pi)
         tangent = "tangent " if math.degrees(diff) * 3600 <= tangent_tol_sec else "non-tangent "
     return ("along the arc of a %scurve to the %s, concave %s, having a radius of %s %s, a central "
             "angle of %s, an arc length of %s %s, a chord bearing of %s and a chord distance of %s %s" % (
-                tangent, side, concave_word(seg), _d(r, dist_dec), unit,
-                U.format_angle(delta, sec_dec), _d(arc, dist_dec), unit, _b(caz, sec_dec),
-                _d(chord, dist_dec), unit))
+                tangent, side, concave_word(seg), r_txt, unit,
+                U.format_angle(math.degrees(abs(sw)), sec_dec), arc_txt, unit, _b(caz, sec_dec),
+                _chord_text(chord, dist_dec), unit))
+
+
+def _arc_text(arc, radius, target_deg, dec):
+    """Arc length whose arc/radius is within one second of the stated angle."""
+    span = 1.0 / 3600.0
+    for d in range(dec, 8):
+        text = _d(arc, d)
+        if radius and abs(math.degrees(_num(text) / radius) - target_deg) < span:
+            return text
+    return _d(arc, max(dec, 6))
+
+
+def _chord_text(chord, dec):
+    """Chord printed so it agrees with the arc and radius the reader recomputes."""
+    tol = max(0.02, abs(chord) * 1e-5)
+    for d in range(dec, 5):
+        text = _d(chord, d)
+        if abs(_num(text) - chord) <= tol - 1e-6:
+            return text
+    return _d(chord, max(dec, 4))
 
 
 def describe_ring(ring, unit="feet", sec_dec=0, dist_dec=2):

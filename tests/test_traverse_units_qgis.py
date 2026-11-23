@@ -89,6 +89,7 @@ class TraverseUnitsTests(unittest.TestCase):
         self.assertAlmostEqual(preview.width(), 200 * factor, places=7)
         self.assertAlmostEqual(preview.height(), 100 * factor, places=7)
         self.dock._create()
+        self.dock._save()
         self.assertEqual(fabric.lines.featureCount(), 4)
         self.assertEqual(fabric.points.featureCount(), 4)
         self.assertEqual(sorted(f['Distance'] for f in fabric.lines.getFeatures()), [100, 100, 200, 200])
@@ -108,6 +109,7 @@ class TraverseUnitsTests(unittest.TestCase):
         self.assertIs(fabric.traverse_map_legs(result.legs), result.legs)
         self.traverse(fabric)
         self.dock._create()
+        self.dock._save()
         parcel = next(fabric.parcels.getFeatures())
         self.assertEqual(parcel.geometry().boundingBox().width(), 200)
         self.assertEqual(parcel.geometry().area(), 20000)
@@ -143,6 +145,7 @@ class TraverseUnitsTests(unittest.TestCase):
         fabric.update_record(record, scale=1.0002, rotation=10)
         self.dock.build_after.setChecked(False)
         self.dock._create()
+        self.dock._save()
         self.assertEqual(fabric.lines.featureCount(), 4)
         for line in fabric.lines.getFeatures():
             self.assertAlmostEqual(line.geometry().length(), line['Distance'] * 1.0002 * fabric.foot_m, places=6)
@@ -188,6 +191,7 @@ class TraverseUnitsTests(unittest.TestCase):
         self.dock._picked(QgsPointXY(x, y), '')
         self.assertEqual(self.dock._start(), (x, y))
         self.dock._create()
+        self.dock._save()
         self.assertTrue(any(p.geometry().asPoint() == QgsPointXY(x, y) for p in fabric.points.getFeatures()))
 
     def test_new_fabric_dialog_refuses_web_mercator(self):
@@ -224,6 +228,7 @@ class TraverseUnitsTests(unittest.TestCase):
         self.dock.adjust.setCurrentIndex(1)
         self.dock.build_after.setChecked(False)
         self.dock._create()
+        self.dock._save()
         self.assertEqual(sorted(f['Direction'] for f in fabric.lines.getFeatures()), [0, 90, 180, 270])
         self.assertEqual(fabric.points.featureCount(), 4)
         self.assertEqual(sorted(f['Distance'] for f in fabric.lines.getFeatures()), [100, 100, 199, 200])

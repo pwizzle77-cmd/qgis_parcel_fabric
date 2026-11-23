@@ -3,8 +3,9 @@
 
 Images (PNG, JPG, TIF including multi-page TIF) are read with Qt.  PDFs are
 rendered with Qt's PDF module when QGIS has it, otherwise with GDAL's PDF
-driver, otherwise with Poppler's pdftoppm if it's installed.  PDFs that
-already contain text give that text directly (no OCR needed).
+driver, otherwise with Poppler's pdftoppm if it's installed.  Every page is
+rendered for the vision model.  A PDF text layer is not used: embedded text
+from a deed is a poor reading of bearings and fractions.
 """
 
 import base64
@@ -67,22 +68,6 @@ def _pdf_document():
         except ImportError:
             return None
     return QPdfDocument(None)
-
-
-def pdf_text(path):
-    """Text layer of a PDF, page by page, or [] if there isn't one/we can't read it."""
-    doc = _pdf_document()
-    if doc is None:
-        return []
-    doc.load(path)
-    out = []
-    for i in range(doc.pageCount()):
-        try:
-            sel = doc.getAllText(i)
-            out.append(sel.text())
-        except AttributeError:
-            return []
-    return out if any(t.strip() for t in out) else []
 
 
 def _pdf_qt(path, dpi):
@@ -163,11 +148,8 @@ def pdf_pages(path, dpi=200):
 
 
 def load(path, dpi=200):
-    """(page images as base64 PNG, text layer pages or [])."""
+    """(page images as base64 PNG, []). The second value stays empty: pages are always images."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
-        text = pdf_text(path)
-        if text:
-            return [], text
         return pdf_pages(path, dpi), []
     return image_pages(path), []

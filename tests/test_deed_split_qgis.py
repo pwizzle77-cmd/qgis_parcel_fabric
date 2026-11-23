@@ -10,8 +10,8 @@ from qgis.PyQt.QtCore import QDate
 from qgis.PyQt.QtWidgets import QWidget
 
 from parcel_fabric.core import cogo as C
+from parcel_fabric.core import mistake as M
 from parcel_fabric.core.build import build_parcels
-from parcel_fabric.core.clear import apply_clear, plan_clear
 from parcel_fabric.core.deed_split import apply_deed_split, plan_deed_split
 from parcel_fabric.core.edits import EditError
 from parcel_fabric.core.fabric import CURRENT, EditSession
@@ -170,7 +170,7 @@ class DeedSplitTests(_Deed):
         self.assertEqual((len(plan.inside), len(plan.along)), (1, 3))
         apply_deed_split(self.fab, plan, self.qcd)
         self.assertEqual(sum(1 for f in self.fab.parcels.getFeatures() if f["CreatedByRecord"] == self.qcd), 1)
-        apply_clear(self.fab, plan_clear(self.fab, self.qcd))
+        M.apply(self.fab, self.qcd, False)
         got = next(f for f in self.fab.parcels.getFeatures() if f["CreatedByRecord"] == rec)
         self.assertAlmostEqual(got.geometry().area() / 43560, 47.741, delta=0.001)
 
@@ -198,7 +198,7 @@ class DeedSplitTests(_Deed):
             self.parent = next(self.fab.parcels.getFeatures())
             apply_deed_split(self.fab, self.plan(*calls), self.qcd)
             self.assertEqual(len(self.parcels()), 2)
-            apply_clear(self.fab, plan_clear(self.fab, self.qcd))
+            M.apply(self.fab, self.qcd, False)
             got = self.parcels()
             self.assertEqual(list(got), ["12-4S-16-02942-000"])
             self.assertAlmostEqual(got["12-4S-16-02942-000"].geometry().area(), area, places=4)
@@ -211,10 +211,10 @@ class DeedSplitTests(_Deed):
         later = self.fab.create_record("Later deed", "Deed")
         plan = self.plan(at(100, 0), (E_, 50), (S_, 100), (W_, 50), (N, 100))
         apply_deed_split(self.fab, plan, later)
-        with self.assertRaisesRegex(EditError, "Later deed"):
-            plan_clear(self.fab, self.qcd)
-        apply_clear(self.fab, plan_clear(self.fab, later))
-        apply_clear(self.fab, plan_clear(self.fab, self.qcd))
+        with self.assertRaisesRegex(M.MistakeError, "later record split"):
+            M.apply(self.fab, self.qcd, False)
+        M.apply(self.fab, later, False)
+        M.apply(self.fab, self.qcd, False)
         self.assertAlmostEqual(self.parcels()["12-4S-16-02942-000"].geometry().area(), 200000, places=3)
 
 
@@ -272,7 +272,26 @@ class DeedDockTests(_Deed):
         self.assertIn("Deed piece: 0.689 acres by the deed, 0.689 fitted", seen[0])
         self.assertIn("Remainder: 3.903 acres", seen[0])
         self.assertEqual(sorted(self.parcels()), ["12-4S-16-02942-000", "12-4S-16-02942-001"])
-        self.assertEqual(self.dock.tie, [])
+
+    def test_split_drops_an_unsaved_preview(self):
+        self.load_deed()
+        self.dock._create()
+        self.assertTrue(self.fab.lines.isEditable())
+        self.fab.parcels.select(self.parent.id())
+        with patch.object(self.T.QMessageBox, "exec", new=lambda box: next(
+                b for b in box.buttons() if "keeps" in b.text()).click()):
+            self.dock._split()
+        self.assertEqual(sorted(self.parcels()), ["12-4S-16-02942-000", "12-4S-16-02942-001"])
+        self.assertFalse(any(lx.isEditable() for lx in self.fab.edit_layers()))
+
+    def test_remove_mistake_undoes_a_split_under_the_database_rules(self):
+        from parcel_fabric.core import safeguards
+        safeguards.run(self.fab)
+        apply_deed_split(self.fab, self.plan(*self.nw()), self.qcd)
+        M.apply(self.fab, self.qcd, True)
+        self.assertAlmostEqual(self.parcels()["12-4S-16-02942-000"].geometry().area(), 200000, places=3)
+        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 4)
+        self.assertIsNone(self.fab.record_by_id(self.qcd))
 
     def test_cancel_and_no_selection_change_nothing(self):
         before = self.state()

@@ -519,8 +519,12 @@ class Fabric:
             return None
         return Course(LINE, az, dist)
 
-    def add_traverse(self, target, legs, record_gid, dim_source="Record", rotation=0.0, scale=1.0):
-        """Write foot-based traverse offsets as map-unit lines and end points in one edit."""
+    def add_traverse(self, target, legs, record_gid, dim_source="Record", rotation=0.0, scale=1.0,
+                     session=None):
+        """Write foot-based traverse offsets as map-unit lines and end points in one edit.
+
+        ``session`` writes into an edit the caller already opened, and does not save it.
+        """
         legs = self.traverse_map_legs(legs)
         lyr = self.line_layer(target)
         pts = self.points
@@ -543,11 +547,17 @@ class Fabric:
                                            None if target == CONNECTIONS else target))
             need_point(leg.start)
             need_point(leg.end)
-        with EditSession([lyr, pts], "Traverse") as ed:
+        def write(ed):
             for f in feats:
                 ed.add(lyr, f)
             for p in new_pts:
                 ed.add(pts, p)
+
+        if session is not None:
+            write(session)
+        else:
+            with EditSession([lyr, pts], "Traverse") as ed:
+                write(ed)
         return len(feats), len(new_pts)
 
 
@@ -572,12 +582,16 @@ class EditSession:
     A layer that is NOT in edit mode is put in edit mode and saved when the
     block ends (rolled back if anything fails).  A layer the user is already
     editing just gets an undo step; the user saves it as usual.
+    ``commit=False`` leaves that edit open. The caller saves or undoes it.
     """
 
-    def __init__(self, layers, label="Parcel fabric edit"):
+    def __init__(self, layers, label="Parcel fabric edit", commit=True):
         self.layers = [lx for lx in layers if lx is not None]
         self.label = label
+        self.commit = commit
         self._started = []
+        self.held = []          # layers this session turned editable and did not save
+        self.marks = []         # (layer, undo index before this command)
 
     def __enter__(self):
         for lx in self.layers:
@@ -585,6 +599,8 @@ class EditSession:
                 if not lx.startEditing():
                     raise RuntimeError("Layer %s can't be edited" % lx.name())
                 self._started.append(lx)
+            stack = lx.undoStack()
+            self.marks.append((lx, stack.index() if stack is not None else 0))
             lx.beginEditCommand(self.label)
         return self
 
@@ -612,6 +628,11 @@ class EditSession:
             return False
         for lx in self.layers:
             lx.endEditCommand()
+        if not self.commit:
+            # Leave the edit open. The caller saves with commitChanges, or
+            # undoes back to marks and rollBack on held.
+            self.held = list(self._started)
+            return False
         errors = []
         for lx in self._started:
             if errors:

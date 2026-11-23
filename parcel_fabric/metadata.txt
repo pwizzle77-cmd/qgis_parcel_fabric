@@ -11,11 +11,9 @@ tracker=https://github.com/pwizzle77-cmd/qgis_parcel_fabric/issues
 repository=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 homepage=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 changelog=
-    0.9.0 - Split a parcel by a deed's calls (Traverse > Split Selected Parcel): fits the deed to the parent, keeps deed dimensions, remainder keeps its number; commencement ties are run to the POB; splits save completely or not at all
-    0.8.9 - Traverse start points keep every decimal; Web Mercator is refused for new fabrics, traverses and legal descriptions because it skews and scales parcels
-    0.8.8 - Split, Divide, Merge, Subdivide and Copy Parallel save again (copied lines get their own fid); Parcel Lineage is no longer hidden by show-only-current
-    0.8.7 - Traverse is a preview until it is good (closure, gap, crossing checks) and saves to the active record as one edit; Records > Remove Mistake clears everything a record created
-    0.8.6 - Parcel numbers work with split PLSS layers (sections + townships); default BLM National PLSS REST source added to the fabric group and changeable in Fabric Settings
+    0.9.0 - Split a parcel by a deed's calls (Traverse > Split Selected Parcel): fits the deed to the parent, keeps the deed's dimensions, remainder keeps its number, commencement ties are run to the POB; Save only a good traverse; Remove mistake also undoes splits whose remainder kept its number; parcel numbers work with split PLSS layers, BLM National PLSS by default; start points keep every decimal; Web Mercator is refused; Split, Divide, Merge, Subdivide and Copy Parallel save to GeoPackage again; Parcel Lineage is no longer hidden by show-only-current
+    0.8.7 - Traverse Preview puts lines, points and the parcel in an edit session. Save writes them. Clear throws the preview away and leaves the courses. Remove mistake no longer crashes when its confirm dialog opens.
+    0.8.6 - Remove mistake rolls back one record when nothing later used it; deed pages are always read by the vision model, including PDFs that already have text; legal descriptions of circles and rounded, concave or convex edges close; a record can be filed before it is mapped; running calls such as "West along the south line, 208 feet" read as metes and bounds
     0.8.5 - Traverse converts foot offsets to fabric CRS units for previews, lines and points; preserves record COGO and area; correct comparison/open endpoint units and safe projected-CRS checks
     0.8.4 - AI Services settings for Ollama, OpenAI, LM Studio and custom OpenAI-compatible servers; per-profile models/endpoints and encrypted QGIS credentials; Read Deed uses the configured service
     0.8.3 - Read Deed: QGIS 4 native PDF text/rendering compatibility, all TIFF pages, loopback-only Ollama without proxies or redirects, stricter AI quote/number checks and explicit review guard

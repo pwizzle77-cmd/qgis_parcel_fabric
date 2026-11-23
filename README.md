@@ -27,35 +27,35 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    (tokens `{type} {book} {page} {name} {year} {date} {id}`, e.g. folder
    `{type}/Book {book}`, file `{type}_B{book}_P{page}`), and, if you
    don't want the default, choose your own PLSS layer(s) for parcel numbers (see below).
-3. **Records** panel – **New Record** with type, book and page (the name fills in
-   if left blank) and **Attach...** a scan: it is copied into the document folder,
-   sub-folders are created and the file is named from the record. **Edit...**
-   corrects a record; if the book or page changes, the stored file can be renamed
-   to match. **Document** opens the scan. **Remove Mistake...** permanently deletes
-   the lines, points and parcels the selected record created and brings back what it
-   retired; the record stays. It refuses if a later record builds on it, and keeps
-   boundaries other parcels share. New lines, points and parcels are
-   stamped with the active record; hand-digitized features get it too.
-3. **Traverse** – pick or type the point of beginning (snaps to fabric points),
+   Use a State Plane (or other survey) coordinate system: Web Mercator and
+   latitude/longitude are refused because they distort distances and bearings.
+3. **Records** panel – **New Record** files a plat or deed (type, book, page, scan)
+   without drawing it. Leave **Start mapping now** off. **Not mapped yet** lists
+   records that have no parcels. **Set Active** when you are ready to draw one:
+   new lines, points and parcels are stamped with that record, and so are
+   hand-digitized features. **Attach...** copies a scan into the document folder
+   and names it from the record. **Edit...** corrects a record; if the book or
+   page changes, the stored file can be renamed to match. **Document** opens the scan.
+4. **Traverse** – pick or type the point of beginning (snaps to fabric points),
    then type courses (`N 45-30-15 E`, `S45°30'15"W`; distances in feet, or add
    `m`, `ch`, `rd`, `lk`, `vr`). Curves take a radius, a side (R/L), an arc,
    chord, delta or tangent length, and say whether the bearing is the chord,
    tangent, radial, or tangent to the previous course. **Paste description...**
    uses COGO Workbench's parser and review step. The panel shows misclose, ratio
-   and area live; Compass rule adjustment is optional. Nothing is written until
-   **Save to Record**, which stays off until there is an active record and the
-   traverse is good: misclose within the Fabric Settings ratio, ends meeting within
-   the snap tolerance (use Compass rule for a small gap) and no crossing courses.
-   An open traverse must start and end on fabric points, or go to Connections.
-   Saving writes COGO-attributed lines (true arcs) and corner points and builds the
-   parcel; if the parcel can't be built, nothing is saved.
+   and area live; Compass rule adjustment is optional. **Preview** puts the
+   lines, points and parcel on the map without saving. **Save** writes
+   them, and only when the traverse is good: there is an active record, the misclose is
+   within the Fabric Settings ratio, the ends meet within the snap tolerance (use Compass
+   rule for a small gap), no courses cross and the parcel builds. An open traverse must
+   start and end on fabric points, or go to Connections.
+   **Clear** throws that preview away and leaves the courses. The lines are COGO-attributed true arcs.
    Start X/Y are in the fabric CRS. Traverse converts course offsets from the
    selected foot definition to the fabric's linear map units, so meter-based
    fabrics draw at the correct size too. Record COGO dimensions, closure and
    calculated area remain in feet/square feet. Geographic (degree) fabric CRSs
    are rejected. This conversion affects newly created traverses; existing lines
-   are not resized.
-4. **Build** – closed loops of current lines become parcels with true curves.
+   are not resized. **Read Deed (AI)...** loads a deed scan into these courses.
+5. **Build** – closed loops of current lines become parcels with true curves.
    A seed polygon (`IsSeed = 1`) inside a loop passes its name on. Misclose and
    `CalculatedArea` come from the record dimensions. The record's footprint and
    `ParcelCount` update. Building again rebuilds; it never duplicates.
@@ -74,7 +74,7 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    township, range (and optional N/S) fields - existing setups keep working.
    Needs internet for the default; if it's unreachable, parcels are built un-numbered
    with a message and can be numbered later.
-5. **Assign Parcel Numbers** – numbers look like `12-4S-16-02942-000`. Select
+6. **Assign Parcel Numbers** – numbers look like `12-4S-16-02942-000`. Select
    parcels, then either give them the next unused ID in their
    section-township-range (split `000`), or number them as splits of a parent:
    `-001`, `-002`... continuing from the highest split already used, north-west
@@ -82,7 +82,7 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    time. Retired numbers are never reused. Each parcel also gets its parts:
    `Section` 12, `Township` 4S, `Range` 16, `ParcelID` `02942-000` (the number
    without section-township-range), `ParcelSeq` 2942 and `SplitNo` 0.
-6. **Check Fabric** – open loops, lines without COGO, line ends without points,
+7. **Check Fabric** – open loops, lines without COGO, line ends without points,
    poor misclose, stated vs calculated area over 1%, unbuilt seeds, features with
    no record. Double-click a row to zoom.
 
@@ -170,12 +170,11 @@ kept up to date after every build, split, divide, merge and record edit.
 
 **Traverse > Read Deed (AI)...** turns a deed file into Traverse courses:
 
-1. **Read Document** – a text PDF is read directly; scanned PDFs and images (PNG, JPG,
-   TIF, multi-page TIF) are turned into page images and transcribed by a vision model
-   using your configured AI service. The default is [Ollama](https://ollama.com)
-   on your own computer (`deepseek-ocr`; `qwen2.5vl` and `gemma4` also work).
-   With Ollama, use a downloaded local model.
-   The text is editable so you can fix misread characters.
+1. **Read Document** – every page (a PDF, even one that already has text, or a PNG,
+   JPG or TIF) is rendered and transcribed by a vision model. Embedded PDF text is
+   not used. The default local model is [Ollama](https://ollama.com) `deepseek-ocr`
+   (`ollama pull deepseek-ocr`); `qwen2.5vl` and `gemma4` also work. The text is
+   editable so you can fix misread characters.
 2. **Find Description** – picks out the legal description (from "Commence/Begin at"
    to the last "Point of Beginning"); **Ask AI to Find It** is the fallback.
 3. **Extract Calls** – COGO Workbench's parser reads the calls first. **Ask AI About
@@ -206,9 +205,10 @@ Switching services retains each service's configuration; Cancel discards edits.
 
 Hosted AI requests send deed text or page images to the configured service and
 may incur charges. The selected endpoint is shown in Read Deed. Opening the
-dialog makes no hosted API request. Text PDFs, deterministic parsing and manual
-entry need no AI key. Quote/number checks and the review checkbox apply to every
-service. HTTPS is required outside loopback; proxies and redirects are disabled.
+dialog makes no hosted API request. Reading a deed file sends its page images
+to the vision model. Deterministic parsing and manual entry need no AI key.
+Quote/number checks and the review checkbox apply to every service. HTTPS is
+required outside loopback; proxies and redirects are disabled.
 
 The Ollama URL must use `localhost`, `127.0.0.1`, or `::1`; HTTP proxies and
 redirects are disabled, and cloud-tagged models are rejected. For server-wide
@@ -274,6 +274,12 @@ change, and fabric features can't be deleted. Split, Divide, Merge and Subdivide
 re-read the parcel from the database before retiring it, so two editors can't split the
 same parcel. Installing triggers needs a login that may create them.
 
+**Remove mistake** (Records panel) is the one way to actually delete. Select the record
+that was entered in error or used for a test. It removes what that record created and
+puts back what it retired, and only when no later record used that work. Otherwise it
+refuses, and the parcels stay in history. The scan in the document folder is left where
+it is. For a throwaway fabric, delete the GeoPackage file.
+
 ## Tables
 
 | Table | Geometry | Notes |
@@ -286,7 +292,8 @@ same parcel. Installing triggers needs a login that may create them.
 | `Parcel_Lineage` | none | Parent → child rows with the record and operation |
 | `QPF_Settings` | none | Parcel types, foot, tolerance, documents, numbering |
 
-Features are retired (`RetiredByRecord`), never deleted, except by Remove Mistake. Pro keeps one table per
+Features are retired (`RetiredByRecord`), never deleted, except **Remove mistake** on a
+record that nothing later used. Pro keeps one table per
 parcel type; here they share one, so an export to Pro splits on `ParcelType`.
 Plugin fields are `ParcelType`, `ParcelNumber`, `Section`, `Township`, `Range`,
 `ParcelID`, `ParcelSeq`, `SplitNo`, `ParentNumber`, `Book`, `Page` and the `QPF_` fields. **To verify against a fabric exported from Pro before 1.0:** the

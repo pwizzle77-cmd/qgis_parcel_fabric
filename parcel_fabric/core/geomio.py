@@ -37,6 +37,14 @@ def curve_segments(curve):
     return out
 
 
+def parts_of(geom):
+    """The polygons of a parcel, curves kept."""
+    g = geom.constGet()
+    if hasattr(g, "numGeometries"):
+        return [QgsGeometry(g.geometryN(i).clone()) for i in range(g.numGeometries())]
+    return [QgsGeometry(geom)]
+
+
 def polygon_rings(geom):
     """[(exterior segments, [hole segments...]), ...] for every part."""
     g = geom.constGet()

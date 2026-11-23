@@ -236,15 +236,9 @@ class LegalWriterDialog(QDialog):
         parts = polygon_rings(geom)
         if not parts:
             return
-        if len(parts) > 1:
-            self.check.setText("<span style='color:#8a5a00'>This feature has %d parts; only the largest "
-                               "is described.</span>" % len(parts))
-            parts.sort(key=lambda p: abs(W.signed_area(p[0])), reverse=True)
-        ext, holes = parts[0]
+        parts.sort(key=lambda p: abs(W.signed_area(p[0])), reverse=True)
         cw = self.direction.currentData()
         start = self.pob_xy if self.pob_mode.currentData() == "pick" else None
-        ring = self._prepare(ext, cw, start)
-        hole_rings = [self._prepare(h, cw) for h in holes]
         commence = None
         if self.commence.isChecked():
             if self.commence_xy is None:
@@ -256,22 +250,31 @@ class LegalWriterDialog(QDialog):
         QgsSettings().setValue(HEADER_KEY, header)
         if "{str}" in header:
             header = header.replace("{str}", self._str_text(self.feature.geometry()))
-        text, area = W.write(ring, unit, self.sec_dec.value(), self.dist_dec.value(), header, commence,
-                             hole_rings)
-        self.out.setPlainText(text)
-        self._self_check(text, area, geom, unit)
+        texts, checks = [], []
+        for k, (ext, holes) in enumerate(parts, 1):
+            text, area = W.write(self._prepare(ext, cw, start), unit, self.sec_dec.value(), self.dist_dec.value(),
+                                 "" if len(parts) > 1 else header, commence,
+                                 [self._prepare(h, cw) for h in holes])
+            poly_area = abs(W.signed_area(ext)) - sum(abs(W.signed_area(h)) for h in holes)
+            good, msg = self._self_check(text, area, poly_area, unit)
+            if len(parts) > 1:
+                text, msg = "TRACT %d\n\n%s" % (k, text), "Tract %d: %s" % (k, msg)
+            texts.append(text)
+            checks.append("<span style='color:%s'>%s</span>" % ("#1b5e20" if good else "#b3261e", msg))
+        if len(parts) > 1:
+            texts.insert(0, header.strip())
+        self.out.setPlainText("\n\n".join(texts))
+        self.check.setText("<br>".join(checks))
 
-    def _self_check(self, text, area, geom, unit):
-        """Read the description back and close it, so typos can't slip in."""
+    def _self_check(self, text, area, poly_area, unit):
+        """Read the description back and close it, so typos can't slip in. Returns (good, message)."""
         boundary = text.split("\n\nLESS AND EXCEPT")[0]
         foot = U.US_SURVEY_FOOT_M if unit == "feet" else 1.0
         try:
             _rows, courses, problems = parse(boundary, foot, boundary_only=False)
             res = C.compute((0.0, 0.0), courses)
         except Exception as e:      # parser gave up - say so rather than hide it
-            self.check.setText("Self-check couldn't read the description back: %s" % e)
-            return
-        poly_area = abs(geom.area())
+            return False, "Self-check couldn't read the description back: %s" % e
         sq, big = ("sq ft", 43560.0) if unit == "feet" else ("sq m", 10000.0)
         msg = ("Self-check: read back as %d courses; closes within %.3f %s%s. "
                "Describes %.3f %s; the polygon is %.3f %s.") % (
@@ -279,10 +282,9 @@ class LegalWriterDialog(QDialog):
             "" if res.misclose < 1e-6 else " (1:%s)" % "{:,}".format(int(res.ratio)),
             area / big, "ac" if unit == "feet" else "ha", poly_area / big, "ac" if unit == "feet" else "ha")
         good = not problems and res.misclose < 0.05
-        color = "#1b5e20" if good else "#b3261e"
         if problems:
             msg += " Couldn't read back: " + "; ".join(problems[:3])
-        self.check.setText("<span style='color:%s'>%s</span>" % (color, msg))
+        return good, msg
 
     def _save(self):
         p, _ = QFileDialog.getSaveFileName(self, "Save legal description", "legal description.txt",

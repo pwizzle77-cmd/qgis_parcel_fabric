@@ -21,6 +21,7 @@ from . import schema as S
 from . import units as U
 from .build import build_parcels
 from .fabric import CURRENT, EditSession
+from .geomio import parts_of
 
 # a few field names that differ between Pro versions / exports
 ALIASES = {"RecordedDate": ["RecordedDate", "RecordDate", "Recorded_Date", "DateRecorded"],
@@ -66,13 +67,13 @@ def _geom_for(target, g, xf):
     a = g.get()
     a.dropZValue()
     a.dropMValue()
-    if g.isMultipart():
-        parts = g.asGeometryCollection()
+    want = target.wkbType()
+    from qgis.core import QgsWkbTypes
+    if g.isMultipart() and not QgsWkbTypes.isMultiType(want):
+        parts = parts_of(g)
         if len(parts) != 1:
             return None
         g = parts[0]
-    want = target.wkbType()
-    from qgis.core import QgsWkbTypes
     if QgsWkbTypes.isCurvedType(want) and not g.constGet().hasCurvedSegments():
         g = QgsGeometry(g.constGet().toCurveType())
     if QgsWkbTypes.isMultiType(want):

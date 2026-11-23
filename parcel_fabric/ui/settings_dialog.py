@@ -60,6 +60,15 @@ class SettingsDialog(QDialog):
         gf.addRow("Snap tolerance", self.tol)
         gf.addRow("Flag misclose worse than", self.ratio)
         gf.addRow("", self.packed)
+        multi = QHBoxLayout()
+        self.multi_lbl = QLabel("One parcel can have several polygons" if fabric.multipart
+                                else "One polygon per parcel")
+        multi.addWidget(self.multi_lbl, 1)
+        if not fabric.multipart and fabric.parcels.providerType() == "ogr":
+            self.multi_btn = QPushButton("Allow multi-polygon parcels...")
+            self.multi_btn.clicked.connect(self._allow_multipart)
+            multi.addWidget(self.multi_btn)
+        gf.addRow("Parcels", multi)
         gf.addRow("Distance unit", QLabel("%s (set when the fabric was created)" % foot))
         tabs.addTab(g, "General")
 
@@ -345,6 +354,23 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "Fabric Settings", str(e))
             return
         self.accept()
+
+    def _allow_multipart(self):
+        if QMessageBox.question(
+                self, "Multi-polygon parcels", "Change this fabric so one parcel number can have several polygons?\n\n"
+                "A copy of the GeoPackage is saved next to it first. Everyone using the fabric needs Parcel Fabric "
+                "0.10 or newer afterwards, and should close it while you do this.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            backup = self.fabric.convert_to_multipart()
+        except Exception as e:
+            QMessageBox.critical(self, "Multi-polygon parcels", "Nothing was changed: %s" % e)
+            return
+        self.multi_btn.hide()
+        self.multi_lbl.setText("One parcel can have several polygons")
+        QMessageBox.information(self, "Multi-polygon parcels", "Done. The fabric as it was is saved as\n%s" % backup)
 
     def _type_used(self, t):
         req = QgsFeatureRequest().setFilterExpression(type_expr(t)).setLimit(1)

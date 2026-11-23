@@ -4,6 +4,8 @@
 Like Pro's Build, it:
   * finds every closed loop of current lines of one parcel type that touches
     the active record's lines (or the given map extent),
+  * keeps a multi-polygon parcel together: rebuilding one of its loops
+    rebuilds the parcel,
   * creates a parcel polygon with TRUE CURVES assembled from the lines
     themselves (not the segmented outline), so parcels and lines coincide,
   * fills a seed polygon (IsSeed = 1) that sits inside the loop, so a name
@@ -24,6 +26,7 @@ from qgis.core import (
     QgsFeature,
     QgsFeatureRequest,
     QgsGeometry,
+    QgsMultiSurface,
     QgsPointXY,
     QgsPolygon,
     QgsRectangle,
@@ -33,6 +36,7 @@ from qgis.core import (
 from . import schema as S
 from .cogo import loop_misclose
 from .fabric import CURRENT, EditSession, Fabric, type_expr
+from .geomio import parts_of
 from .topo import chain_ring
 
 
@@ -50,6 +54,7 @@ class Issue:
 class BuildReport:
     created: int = 0
     new_ids: List[str] = field(default_factory=list)    # GlobalIDs of new parcels
+    rebuilt_ids: List[str] = field(default_factory=list)
     rebuilt: int = 0
     seeds_used: int = 0
     points_added: int = 0
@@ -68,6 +73,17 @@ class BuildReport:
         if errs or warns:
             parts.append("%d problem(s), %d warning(s)" % (errs, warns))
         return ", ".join(parts)
+
+
+@dataclass
+class Loop:
+    """One closed loop: a parcel, or one polygon of a multi-polygon parcel."""
+    face: QgsGeometry       # straight-sided copy
+    poly: QgsCurvePolygon
+    pos: object
+    chain: list
+    misclose: tuple         # (distance, ratio), None without COGO
+    area: float             # by COGO
 
 
 def _single_curve(geom):
@@ -118,18 +134,24 @@ def _ring_from(lines, chain):
 
 
 def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle = None,
-                  new_record=None, number=True, adopt=None, within=None, session=None):
+                  new_record=None, number=True, adopt=None, within=None, session=None,
+                  groups=None, outline=None):
     """Build parcels of one type.
 
     ``new_record`` stamps new parcels (default: the build's record).
     ``number`` False skips automatic numbering (splits number themselves).
-    ``adopt`` maps a parcel fid to a point: the loop containing that point
-    takes over the parcel (a split remainder that stays the parent).
+    ``adopt`` maps a parcel fid to a point or points: the loops containing
+    them take over the parcel (a split remainder that stays the parent).
+    ``groups`` are lists of points: the loops containing one list's points
+    become one new multi-polygon parcel.
     ``within`` (QgsGeometry) limits the build to loops inside it.
+    ``outline`` (a polygon) adds the lines on it to the build, whoever created
+    them: a parcel can be closed by its neighbours' lines.
     """
     rep = BuildReport()
-    adopt = dict(adopt or {})
+    adopt = {fid: list(p) if isinstance(p, (list, tuple)) else [p] for fid, p in (adopt or {}).items()}
     adopt_ids = set(adopt)
+    groups = list(groups or [])
     line_lyr = fabric.lines
     parcel_lyr = fabric.parcels
     tol = fabric.tolerance
@@ -149,18 +171,44 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
         scope_ids.add(f.id())
         b = f.geometry().boundingBox()
         bbox = b if bbox is None else _union_rect(bbox, b)
+    if outline is not None:
+        edge = QgsGeometry(outline.constGet().boundary())
+        for f in line_lyr.getFeatures(QgsFeatureRequest().setFilterRect(
+                outline.boundingBox().buffered(tol)).setFilterExpression(current)):
+            curve = _single_curve(f.geometry())
+            if curve is None or f.id() in scope_ids:
+                continue
+            seg = QgsGeometry(curve.segmentize())
+            mid = seg.interpolate(seg.length() / 2.0).asPoint()
+            if all(_on(edge, xy, tol) for xy in _ends(curve) + ((mid.x(), mid.y()),)):
+                scope_ids.add(f.id())
+                b = f.geometry().boundingBox()
+                bbox = b if bbox is None else _union_rect(bbox, b)
     if not scope_ids:
         rep.issues.append(Issue("info", "No current %s lines in this %s to build from."
                                 % (ptype, "record" if record_gid else "map view")))
         return rep
-    if within is not None:
-        bbox = _union_rect(bbox, within.boundingBox())      # the outline may be far from the new lines
     bbox.grow(max(tol * 10, bbox.width() * 0.05, bbox.height() * 0.05))
+    boxes = [bbox]
+    if within is not None:
+        boxes += [p.boundingBox().buffered(tol * 10) for p in parts_of(within)]  # may be far from the new lines
+    multi = {}          # multi-polygon parcels near the build: fid -> their polygons
+    if fabric.multipart:
+        for f in parcel_lyr.getFeatures(QgsFeatureRequest().setFilterRect(bbox).setFilterExpression(current)):
+            polys = [] if f.geometry().isNull() or f.id() in adopt_ids else parts_of(f.geometry())
+            if len(polys) > 1 and not f["RetiredByRecord"]:
+                multi[f.id()] = polys
+                boxes += [p.boundingBox().buffered(tol * 10) for p in polys]
 
     # ---- candidate lines (neighbours can close a loop) ---------------------
+    candidates = {}
+    for box in boxes:
+        for f in line_lyr.getFeatures(QgsFeatureRequest().setFilterRect(box).setFilterExpression(current)):
+            candidates[f.id()] = f
     lines = {}
-    req = QgsFeatureRequest().setFilterRect(bbox).setFilterExpression(current)
-    for f in line_lyr.getFeatures(req):
+    for f in candidates.values():
+        if within is not None and not within.intersects(QgsGeometry(f.geometry().constGet().segmentize())):
+            continue
         curve = _single_curve(f.geometry())
         if curve is None or curve.isEmpty():
             rep.issues.append(Issue("warning", "Line has empty or multi-part geometry",
@@ -184,6 +232,7 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
 
     parcel_fields = parcel_lyr.fields()
     new_feats, updates, points_needed = [], [], []
+    found, spare = [], {}       # loops this build makes; untouched loops of multi-polygon parcels
 
     for face in faces.asGeometryCollection():
         if face.area() <= tol * tol:
@@ -200,8 +249,11 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
                 mid = d["seg"].interpolate(d["len"] / 2.0).asPoint()
                 if _on(ring, (mid.x(), mid.y()), tol):
                     bnd.append(fid)
+        owner = None
         if within is None and not any(fid in scope_ids for fid in bnd):
-            continue                       # loop not touched by this build
+            owner = next((fid for fid, polys in multi.items() if any(_same(face, p, tol) for p in polys)), None)
+            if owner is None:
+                continue                   # loop not touched by this build
         pos = face.pointOnSurface().asPoint()
         if within is not None and not within.contains(QgsGeometry.fromPointXY(pos)):
             continue
@@ -209,6 +261,8 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
         ring_len = ring.length()
         used_len = sum(lines[fid]["len"] for fid in bnd)
         if chain is None or abs(ring_len - used_len) > max(tol * len(bnd) * 2, ring_len * 1e-6):
+            if owner is not None:
+                continue                   # that polygon stays as it is
             rep.issues.append(Issue(
                 "error", "Lines around this area don't form one clean loop - a line may "
                 "cross another without a shared corner point.", pos.x(), pos.y()))
@@ -218,60 +272,94 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
         poly.setExteriorRing(_ring_from(lines, chain))
         for i in range(fpoly.numInteriorRings()):
             poly.addInteriorRing(fpoly.interiorRing(i).clone())
-        geom = QgsGeometry(poly)
 
         ms = loop_misclose([(Fabric.course_from_feature(lines[fid]["f"]), rev) for fid, rev in chain])
+        misclose = carea = None
         if ms is None:
-            mdist = mratio = carea = None
-            rep.issues.append(Issue("warning", "Parcel built, but some of its lines have no COGO "
-                                    "dimensions, so misclose and calculated area are blank.",
-                                    pos.x(), pos.y()))
+            if owner is None:
+                rep.issues.append(Issue("warning", "Parcel built, but some of its lines have no COGO "
+                                        "dimensions, so misclose and calculated area are blank.",
+                                        pos.x(), pos.y()))
         else:
             dx, dy, per, carea = ms
             whole = QgsGeometry(QgsPolygon(fpoly.exteriorRing().clone())).area()
             carea *= face.area() / whole      # holes aren't part of the parcel
             mdist = math.hypot(dx, dy)
             mratio = (per / mdist) if mdist > 1e-9 else None
-            if mratio is not None and mratio < fabric.warn_ratio:
+            misclose = (mdist, mratio)
+            if owner is None and mratio is not None and mratio < fabric.warn_ratio:
                 rep.issues.append(Issue("warning", "Misclose 1:%d (%.3f) is worse than 1:%d."
                                         % (mratio, mdist, fabric.warn_ratio), pos.x(), pos.y()))
-        vals = {"MiscloseDistance": mdist, "MiscloseRatio": mratio, "CalculatedArea": carea}
+        loop = Loop(face, poly, pos, chain, misclose, carea)
+        if owner is not None:
+            spare.setdefault(owner, []).append(loop)
+        else:
+            found.append(loop)
 
-        # ---- match an existing parcel or seed --------------------------------
-        taken = next((fid for fid, pt in adopt.items() if face.contains(pt)), None)
-        if taken is not None:
-            adopt.pop(taken)               # only one loop takes the parent's place
-            target, kind = parcel_lyr.getFeature(taken), "same"
-        else:
-            target, kind = _match(parcel_lyr, face, pos, tol, current)
+    # ---- which parcel does each loop belong to --------------------------------
+    old, new = {}, {}           # parcel fid -> [feature, kind, loops]; key -> loops
+    for k, loop in enumerate(found):
+        target = kind = None
+        for fid, pts in adopt.items():
+            rest = [p for p in pts if not loop.face.contains(p)]
+            if len(rest) < len(pts):
+                adopt[fid] = rest          # only the loops asked for take the parent's place
+                target, kind = parcel_lyr.getFeature(fid), "same"
+                break
+        g = next((i for i, pts in enumerate(groups) if any(loop.face.contains(p) for p in pts)), None)
+        if target is None and g is not None:
+            new.setdefault(("group", g), []).append(loop)
+            continue
+        if target is None:
+            target, kind = _match(parcel_lyr, loop.face, loop.pos, tol, current)
+            if kind == "same" and target.id() in adopt_ids:
+                kind = "overlap"           # a polygon leaving the parcel that keeps the others
         if target is not None and kind in ("seed", "same"):
-            vals["IsSeed"] = 0
-            if not target["CreatedByRecord"] and record_gid:
-                vals["CreatedByRecord"] = record_gid
-            updates.append((target.id(), geom, vals))
-            if kind == "seed":
-                rep.seeds_used += 1
-            else:
-                rep.rebuilt += 1
+            old.setdefault(target.id(), [target, kind, []])[2].append(loop)
+            continue
+        if kind == "overlap" and target.id() not in adopt_ids:
+            rep.issues.append(Issue(
+                "warning", "New parcel overlaps current parcel '%s' from another record. "
+                "Retire the parent once the split is done." % (target["Name"] or target.id()),
+                loop.pos.x(), loop.pos.y(), parcel_lyr.id(), target.id()))
+        new[("loop", k)] = [loop]
+
+    for fid, (target, kind, loops) in old.items():
+        polys, kept = [lp.poly for lp in loops], []
+        if fid in multi:
+            loops = loops + spare.get(fid, [])
+            kept = [p for p in multi[fid] if not any(_same(lp.face, p, tol) for lp in loops)]
+            polys = [lp.poly for lp in loops] + [p.constGet() for p in kept]
+            if kept:
+                rep.issues.append(Issue("warning", "%d polygon(s) of parcel '%s' don't close, so they stay as they "
+                                        "were and its misclose and area are blank." % (
+                                            len(kept), target["ParcelNumber"] or target["Name"] or fid),
+                                        loops[0].pos.x(), loops[0].pos.y(), parcel_lyr.id(), fid))
+        vals = _cogo_values(loops, not kept)
+        vals["IsSeed"] = 0
+        if not target["CreatedByRecord"] and record_gid:
+            vals["CreatedByRecord"] = record_gid
+        updates.append((fid, _parcel_geometry(fabric, polys), vals))
+        if kind == "seed":
+            rep.seeds_used += 1
         else:
-            if kind == "overlap" and target.id() not in adopt_ids:
-                rep.issues.append(Issue(
-                    "warning", "New parcel overlaps current parcel '%s' from another record. "
-                    "Retire the parent once the split is done." % (target["Name"] or target.id()),
-                    pos.x(), pos.y(), parcel_lyr.id(), target.id()))
-            nf = QgsFeature(parcel_fields)
-            nf.setGeometry(geom)
-            base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0, "StatedAreaUnit": 1,
-                    "CreatedByRecord": new_record or record_gid or _record_of(lines, chain)}
-            base.update(vals)
-            for k, v in base.items():
-                i = parcel_fields.indexOf(k)
-                if i >= 0:
-                    nf.setAttribute(i, v)
-            new_feats.append(nf)
-            rep.new_ids.append(nf["GlobalID"])
-            rep.created += 1
-        for fid, _rev in chain:
+            rep.rebuilt += 1
+        rep.rebuilt_ids.append(target["GlobalID"])
+    for loops in new.values():
+        nf = QgsFeature(parcel_fields)
+        nf.setGeometry(_parcel_geometry(fabric, [lp.poly for lp in loops]))
+        base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0, "StatedAreaUnit": 1,
+                "CreatedByRecord": new_record or record_gid or _record_of(lines, loops[0].chain)}
+        base.update(_cogo_values(loops))
+        for k, v in base.items():
+            i = parcel_fields.indexOf(k)
+            if i >= 0:
+                nf.setAttribute(i, v)
+        new_feats.append(nf)
+        rep.new_ids.append(nf["GlobalID"])
+        rep.created += 1
+    for loop in found:
+        for fid, _rev in loop.chain:
             points_needed += [lines[fid]["start"], lines[fid]["end"]]
 
     # ---- parcel numbers for brand-new parcels ---------------------------------
@@ -402,11 +490,40 @@ def _record_of(lines, chain):
     return max(counts, key=counts.get) if counts else None
 
 
+def _same(face, poly, tol):
+    """Is this loop that polygon (a new footprint within 0.1%)?"""
+    seg = QgsGeometry(poly.constGet().segmentize())
+    fa = face.area()
+    return fa > 0 and abs(seg.area() - fa) <= max(fa * 0.001, tol) and seg.intersects(face) \
+        and seg.intersection(face).area() >= fa * 0.999
+
+
+def _cogo_values(loops, complete=True):
+    """Misclose of the worst loop and the total area by COGO (blank when any loop has none)."""
+    if not complete or any(lp.misclose is None for lp in loops):
+        return {"MiscloseDistance": None, "MiscloseRatio": None, "CalculatedArea": None}
+    worst = min((lp.misclose for lp in loops), key=lambda m: math.inf if m[1] is None else m[1])
+    return {"MiscloseDistance": worst[0], "MiscloseRatio": worst[1], "CalculatedArea": sum(lp.area for lp in loops)}
+
+
+def _parcel_geometry(fabric, polys):
+    """A Parcels geometry from curve polygons."""
+    if not fabric.multipart:
+        if len(polys) != 1:
+            raise ValueError("This fabric stores one polygon per parcel. Turn on multi-polygon parcels in "
+                             "Fabric Settings.")
+        return QgsGeometry(polys[0].clone())
+    out = QgsMultiSurface()
+    for p in polys:
+        out.addGeometry(p.clone())
+    return QgsGeometry(out)
+
+
 def _match(parcel_lyr, face, pos, tol, current):
     """Find the parcel this loop should fill.
 
     Returns (feature, kind): kind is "seed" (a seed inside the loop),
-    "same" (a current parcel with the same footprint - rebuild it),
+    "same" (a current parcel with that footprint, or that polygon - rebuild it),
     "overlap" (a different current parcel covers the loop) or None.
     """
     req = QgsFeatureRequest().setFilterRect(face.boundingBox()).setFilterExpression(current)
@@ -423,10 +540,9 @@ def _match(parcel_lyr, face, pos, tol, current):
         seg = QgsGeometry(g.constGet().segmentize())
         if not seg.intersects(face):
             continue
-        inter = seg.intersection(face).area()
-        if fa > 0 and abs(seg.area() - fa) <= max(fa * 0.001, tol) and inter >= fa * 0.999:
+        if any(_same(face, p, tol) for p in parts_of(g)):
             same = same or f
-        elif inter > fa * 0.5:
+        elif seg.intersection(face).area() > fa * 0.5:
             overlap = overlap or f
     if same is not None:
         return same, "same"

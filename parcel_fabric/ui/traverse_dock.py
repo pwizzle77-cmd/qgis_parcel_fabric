@@ -6,7 +6,7 @@ Preview puts the lines, points and parcel in an unsaved edit; Save keeps it when
 
 import math
 
-from qgis.core import Qgis, QgsGeometry, QgsLineString, QgsPoint, QgsPointXY, QgsPolygon
+from qgis.core import Qgis, QgsFeatureRequest, QgsGeometry, QgsLineString, QgsPoint, QgsPointXY
 from qgis.gui import QgsRubberBand, QgsVertexMarker
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
@@ -18,9 +18,10 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core import cogo as C
 from ..core import units as U
+from ..core.adjoin import fit_traverse
 from ..core.build import _dates, build_parcels
 from ..core.deed_split import apply_deed_split, plan_deed_split
-from ..core.edits import EditError
+from ..core.edits import EditError, EditResult, node_lines
 from ..core.fabric import CONNECTIONS, EditSession
 from .issues_dialog import IssuesDialog
 from .legal_dialog import LegalDialog
@@ -172,16 +173,17 @@ class TraverseDock(QDockWidget):
         sr = QHBoxLayout()
         self.fit = QDoubleSpinBox()
         self.fit.setRange(0.01, 50)
-        self.fit.setValue(1)
+        self.fit.setValue(0.5)
         self.fit.setSuffix(" ft")
-        self.fit.setToolTip("Deed corners this close to the parent's corners or lines are held to them; "
-                            "corners further outside the parent are refused")
+        self.fit.setToolTip("Corners this close to existing corners or lines are held to them, and courses along "
+                            "existing lines reuse them. For a split, corners further outside the parent are refused")
+        self.fit.valueChanged.connect(lambda *_: self._sync_save())
         self.split_btn = QPushButton("Split Selected Parcel...")
         self.split_btn.setToolTip("These courses are the land a deed conveys out of the selected fabric parcel")
         self.split_btn.setEnabled(False)
         self.split_btn.clicked.connect(self._split)
         sr.addStretch(1)
-        sr.addWidget(QLabel("Fit to parent within"))
+        sr.addWidget(QLabel("Fit to existing lines within"))
         sr.addWidget(self.fit)
         sr.addWidget(self.split_btn)
         lay.addLayout(sr)
@@ -454,7 +456,8 @@ class TraverseDock(QDockWidget):
             for r in range(self.table.rowCount())]
         return ([r for r in rows if any(r[:3])], self.x.text(), self.y.text(), self.use_tie.isChecked(),
                 self.closed.isChecked(), self.adjust.currentData(), self.target.currentText(),
-                self.dimsrc.currentText(), self.build_after.isChecked(), self.manager.active_record_id,
+                self.dimsrc.currentText(), self.build_after.isChecked(), self.fit.value(),
+                self.manager.active_record_id,
                 self._record_g2g())
 
     def _sync_save(self):
@@ -607,6 +610,7 @@ class TraverseDock(QDockWidget):
                 p = seg.pointN(i)
                 pts.append(QgsPoint(p.x(), p.y()))
         pts.append(QgsPoint(pts[0].x(), pts[0].y()))
+        from qgis.core import QgsPolygon
         poly = QgsGeometry(QgsPolygon(QgsLineString(pts)))
         m = measure(poly, ref)
         factor = fab.map_units_per_foot
@@ -645,22 +649,37 @@ class TraverseDock(QDockWidget):
         layers = [fab.line_layer(target), fab.points]
         if building:
             layers = [fab.parcels] + layers + [fab.records]      # the layer likeliest to be refused saves first
-        rep = None
+        rep = fit = None
+        legs = fab.traverse_map_legs(final.legs)
+        split = EditResult()
         try:
+            if target in fab.parcel_types and not why:          # a bad traverse is shown as entered
+                fit = fit_traverse(fab, legs, target, self.fit.value() * fab.map_units_per_foot,
+                                   self.closed.isChecked())
+                legs = fit.legs
             with EditSession(layers, "Traverse", commit=False) as ed:
-                n_lines, n_pts = fab.add_traverse(target, final.legs, rec, self.dimsrc.currentText(),
-                                                  math.radians(rot), scale, session=ed)
+                for xy in fit.nodes if fit else ():
+                    node_lines(fab, target, xy, rec, ed, split)
+                n_lines, n_pts = fab.add_traverse(target, legs, rec, self.dimsrc.currentText(),
+                                                  math.radians(rot), scale, session=ed, mapped=True)
                 if building:
-                    rep = build_parcels(fab, target, rec, session=ed)
+                    rep = build_parcels(fab, target, rec, session=ed, outline=fit.outline if fit else None)
+        except EditError as e:
+            QMessageBox.warning(self, "Traverse", str(e))
+            return
         except Exception as e:
             QMessageBox.critical(self, "Traverse", "Could not preview the traverse: %s" % e)
             return
         if rep is not None and not why:
-            why = self._build_problem(fab, final, rep)
+            why = self._build_problem(fab, fit.outline, rep, n_lines)
         self._staged, self._staged_why = ed, why
         self._staged_sig, self._staged_rec = self._signature(), rec
         self._sync_save()
         msg = "%d line(s) and %d point(s) previewed on %s. Not saved." % (n_lines, n_pts, target)
+        if fit is not None and (fit.along or split.lines_split):
+            msg += " %d course(s) use existing lines" % fit.along
+            msg += ", %d of them split at a new corner" % split.lines_split if split.lines_split else ""
+            msg += "; largest adjustment %.2f ft." % (fit.moved / fab.map_units_per_foot)
         if rep is not None:
             msg += " " + rep.summary()
             if rep.issues:
@@ -736,9 +755,11 @@ class TraverseDock(QDockWidget):
                         parent["ParcelNumber"] or parent["Name"] or "#%d" % parent.id(), final.area / 43560.0,
                         plan.piece.area() / acre, plan.left / acre, moved,
                         len(plan.inside), len(plan.along)))
-            if len(plan.remainders) > 1:
+            if len(plan.remainders) > 1 and not fab.multipart:
                 text += ("\n\nThe deed leaves %d separate remainder pieces. Only the largest can keep the "
                          "parent's number; the others become new parcels." % len(plan.remainders))
+            elif len(plan.remainders) > 1:
+                text += "\n\nThe remainder is %d polygons under one parcel number." % len(plan.remainders)
             box = QMessageBox(QMessageBox.Icon.Question, title, text, parent=self)
             keep = box.addButton("Remainder keeps the number", QMessageBox.ButtonRole.AcceptRole)
             new = box.addButton("All pieces are new", QMessageBox.ButtonRole.AcceptRole)
@@ -762,13 +783,16 @@ class TraverseDock(QDockWidget):
         else:
             self.iface.messageBar().pushSuccess("Parcel Fabric", "Split: " + res.summary())
 
-    def _build_problem(self, fab, res, rep):
+    def _build_problem(self, fab, outline, rep, n_lines):
         """Why the previewed parcel isn't good ('' when it built)."""
-        ring = self._map_points(fab, fab.traverse_map_legs(res.legs))
-        ring[-1] = ring[0].clone()
-        poly = QgsGeometry(QgsPolygon(QgsLineString(ring)))
         bad = [i for i in rep.issues if i.severity == "error" and i.x is not None
-               and poly.contains(QgsGeometry.fromPointXY(QgsPointXY(i.x, i.y)))]
-        if not bad and (rep.created or rep.rebuilt or rep.seeds_used):
-            return ""
-        return "the parcel couldn't be built. %s" % (bad[0].message if bad else "")
+               and outline.contains(QgsGeometry.fromPointXY(QgsPointXY(i.x, i.y)))]
+        inside = outline.pointOnSurface()
+        mine = set(rep.new_ids + rep.rebuilt_ids)
+        built = any(f["GlobalID"] in mine and f.geometry().contains(inside)
+                    for f in fab.parcels.getFeatures(QgsFeatureRequest().setFilterRect(outline.boundingBox())))
+        if bad or not built:
+            return "the parcel couldn't be built. %s" % (bad[0].message if bad else "")
+        if not n_lines and not rep.new_ids:
+            return "this parcel is already in the fabric."
+        return ""

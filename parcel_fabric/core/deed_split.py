@@ -161,5 +161,7 @@ def apply_deed_split(fabric, plan, record, remainder_keeps=True, dim_source="Rec
                     ed.change(lyr, old.id(), name, f[name])
                 ed.change(lyr, old.id(), "Direction", (f["Direction"] + (0 if same else 180)) % 360)
 
+    # what's left is one parcel, however many polygons it has (a single-polygon fabric: the largest)
+    left = [p.pointOnSurface() for p in (plan.remainders if fabric.multipart else plan.remainders[:1])]
     return replace_parcel(fabric, plan.parent, plan.nodes, [feature(leg) for leg in plan.inside], record, "Split",
-                          plan.remainders[0] if remainder_keeps else None, deed_dimensions)
+                          left if remainder_keeps else None, deed_dimensions, None if remainder_keeps else [left])

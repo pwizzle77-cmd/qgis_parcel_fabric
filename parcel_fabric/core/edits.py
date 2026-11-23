@@ -31,6 +31,7 @@ from . import schema as S
 from . import units as U
 from .build import _dates, _single_curve, build_parcels, update_record_footprint
 from .fabric import CURRENT, EditSession, quote, type_expr
+from .geomio import parts_of
 
 
 class EditError(RuntimeError):
@@ -256,8 +257,7 @@ def clip_cuts(fabric, parcel_geom, cut_geoms):
     """
     tol = fabric.tolerance
     seg = _seg(parcel_geom)
-    ring = QgsGeometry(seg.constGet().exteriorRing().clone()) if seg.constGet().numInteriorRings() == 0 \
-        else QgsGeometry(seg.constGet().boundary())
+    ring = QgsGeometry(seg.constGet().boundary())
     out = []
     for g in cut_geoms:
         inside = g.intersection(seg)
@@ -302,7 +302,8 @@ def cut_parcel(fabric, parent, cut_geoms, record, operation="Split", remainder_k
 
     The parent is retired by ``record`` and the pieces become new parcels -
     or, with ``remainder_keeps``, the largest piece stays the parent (same
-    number and record) and only the other pieces are new.  ``remainder_point``
+    number and record, with any polygon the cut doesn't cross) and only the
+    other pieces are new.  ``remainder_point``
     (QgsGeometry point) picks a different piece to keep.
     """
     _require_record(record)
@@ -311,12 +312,18 @@ def cut_parcel(fabric, parent, cut_geoms, record, operation="Split", remainder_k
     pgeom = parent.geometry()
     cuts = clip_cuts(fabric, pgeom, cut_geoms)
     pieces = _pieces(pgeom, cuts)
-    if len(pieces) < 2:
+    polys = [_seg(p) for p in parts_of(pgeom)]
+    if len(pieces) <= len(polys):
         raise EditError("The cut doesn't divide the parcel into separate pieces.")
     keep = None
     if remainder_keeps:
-        keep = next((g for g in pieces if remainder_point is not None and g.contains(remainder_point)),
-                    None) or max(pieces, key=lambda g: g.area())
+        whole = [p for p in polys if not any(
+            QgsGeometry.fromPolylineXY([QgsPointXY(*q) for q in c]).intersection(p).length() > fabric.tolerance
+            for c in cuts)]                 # polygons the cut doesn't cross
+        cut_up = [g for g in pieces if not any(p.contains(g.pointOnSurface()) for p in whole)]
+        best = next((g for g in cut_up if remainder_point is not None and g.contains(remainder_point)),
+                    None) or max(cut_up, key=lambda g: g.area())
+        keep = [g.pointOnSurface() for g in [best] + whole]
     new_lines = [_new_line(fabric, fabric.lines, [a, b], ptype, record, dim_source)    # one line per course
                  for pts in cuts for a, b in zip(pts, pts[1:])
                  if math.hypot(b[0] - a[0], b[1] - a[1]) > fabric.tolerance]
@@ -324,12 +331,14 @@ def cut_parcel(fabric, parent, cut_geoms, record, operation="Split", remainder_k
     return replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep)
 
 
-def replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep=None, finish_lines=None):
+def replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep=None, finish_lines=None,
+                   groups=None):
     """Add ``new_lines`` inside ``parent`` and build the pieces, as one edit.
 
-    Boundary lines are split at ``nodes``.  ``keep`` (a piece's geometry) stays the
-    parent; without it the parent is retired.  ``finish_lines(ed)`` may adjust lines
-    before the parcels are built.
+    Boundary lines are split at ``nodes``.  The pieces at the ``keep`` points stay the
+    parent; without any the parent is retired.  The pieces at each of the ``groups``'
+    points become one new parcel.  ``finish_lines(ed)`` may adjust lines before the
+    parcels are built.
     """
     res = EditResult()
     ptype = parent["ParcelType"]
@@ -348,10 +357,12 @@ def replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep=Non
             ed.change(fabric.parcels, parent.id(), "RetiredByRecord", record)
             res.parents_retired = 1
         else:
-            adopt = {parent.id(): keep.pointOnSurface()}
+            adopt = {parent.id(): keep}
         within = _seg(parent.geometry()).buffer(fabric.tolerance, 4)
         rep = build_parcels(fabric, ptype, record, new_record=record, number=False, adopt=adopt,
-                            within=within)
+                            within=within, groups=groups) if new_lines else build_parcels(
+            fabric, ptype, None, within.boundingBox(), new_record=record, number=False, adopt=adopt,
+            within=within, groups=groups)
         res.issues = [i for i in rep.issues if i.severity != "info"]
         kids = _by_gid(fabric, rep.new_ids)
         if not kids or any(i.severity == "error" for i in rep.issues):
@@ -361,6 +372,7 @@ def replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep=Non
         if keep is not None:
             parent = fabric.parcels.getFeature(parent.id())
         L.add(fabric, record, operation, [parent], _by_gid(fabric, rep.new_ids))
+        update_record_footprint(fabric, record, ed)
     _dates(fabric, [record])
     return res
 
@@ -403,6 +415,8 @@ def divide_cuts(parcel_geom, azimuth, mode="equal_area", count=2, area=None, fli
     "width" (lots ``area`` feet wide, measured across the cut lines).
     ``flip`` measures from the other side.  Returns QgsGeometry lines.
     """
+    if len(parts_of(parcel_geom)) > 1:
+        raise EditError("This parcel has several polygons. Separate it first, then divide the one you want.")
     seg = _seg(parcel_geom)
     c = seg.centroid().asPoint()
     deg = math.degrees(azimuth)
@@ -469,11 +483,12 @@ def divide_cuts(parcel_geom, azimuth, mode="equal_area", count=2, area=None, fli
 # --------------------------------------------------------------------------
 # Merge
 # --------------------------------------------------------------------------
-def merge_parcels(fabric, parents, record, keep_number=None):
-    """Merge adjacent current parcels of one type into one new parcel.
+def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
+    """Merge current parcels of one type into one new parcel.
 
     ``keep_number``: a parent's number for the merged parcel, or None for a
-    new number (if numbering is set up).
+    new number (if numbering is set up).  ``apart`` allows parcels that don't
+    touch: they become one multi-polygon parcel.
     """
     _require_record(record)
     if len(parents) < 2:
@@ -486,14 +501,22 @@ def merge_parcels(fabric, parents, record, keep_number=None):
     ptype = types.pop()
     tol = fabric.tolerance
     union = QgsGeometry.unaryUnion([_seg(p.geometry()).buffer(tol / 2, 2) for p in parents]).buffer(-tol / 2, 2)
-    if union.isMultipart() and len(union.asGeometryCollection()) > 1:
-        raise EditError("The selected parcels don't touch - they can't become one parcel.")
+    polys = union.asGeometryCollection() if union.isMultipart() else [union]
+    if len(polys) > 1:
+        if not apart:
+            raise EditError("The selected parcels don't all touch. Tick \"Join parcels that don't touch\" to make "
+                            "one multi-polygon parcel.")
+        if not fabric.multipart:
+            raise EditError("This fabric stores one polygon per parcel. Turn on multi-polygon parcels in "
+                            "Fabric Settings first.")
     boundary = QgsGeometry(union.constGet().boundary())
     res = EditResult()
     lines = fabric.lines
     req = QgsFeatureRequest().setFilterRect(union.boundingBox()).setFilterExpression(
         "%s AND %s" % (CURRENT, type_expr(ptype)))
-    with EditSession([lines, fabric.parcels, fabric.points], "Merge") as ed:
+    from . import parcel_numbers as PN
+    # one edit: if the merged parcel can't be built, the parents and inner lines come back
+    with EditSession([fabric.parcels, lines, fabric.points, fabric.records, fabric.lineage], "Merge") as ed:
         for f in list(lines.getFeatures(req)):
             seg = _seg(f.geometry())
             mid = seg.interpolate(seg.length() / 2)
@@ -504,39 +527,47 @@ def merge_parcels(fabric, parents, record, keep_number=None):
             ed.change(fabric.parcels, p.id(), "RetiredByRecord", record)
             res.parents_retired += 1
         retire_orphan_points(fabric, union, record, ed, ptype)
-    rep = build_parcels(fabric, ptype, None, union.boundingBox().buffered(tol * 10), new_record=record,
-                        number=False, within=union.buffer(tol, 4))
-    res.issues = [i for i in rep.issues if i.severity != "info"]
-    kids = _by_gid(fabric, rep.new_ids)
-    if len(kids) != 1:
-        raise EditError("Merge retired the inner lines but built %d parcels instead of 1. "
-                        "Run Check Fabric." % len(kids))
-    kid = kids[0]
-    from . import parcel_numbers as PN
-    values = {}
-    if keep_number:
-        values = PN.number_fields(keep_number)
-        donor = next((p for p in parents if p["ParcelNumber"] == keep_number), None)
-        if donor is not None and donor["Name"]:
-            values["Name"] = donor["Name"]
-    elif ptype in fabric.number_types:
-        try:
-            PN.number_new(fabric, [kid])
-            values = {k: kid[k] for k in ("ParcelNumber", "Section", "Township", "Range", "ParcelID",
-                                          "ParcelSeq", "SplitNo")}
-        except PN.NumberingNotSetUp as e:
-            res.messages.append("merged parcel not numbered: %s" % e)
-    if values:
-        with EditSession([fabric.parcels], "Number merged parcel") as ed:
-            for k, v in values.items():
-                ed.change(fabric.parcels, kid.id(), k, v)
-    with EditSession([fabric.records], "Record footprint") as ed:
+        rep = build_parcels(fabric, ptype, None, union.boundingBox().buffered(tol * 10), new_record=record,
+                            number=False, within=union.buffer(tol, 4),
+                            groups=[[p.pointOnSurface() for p in polys]])
+        res.issues = [i for i in rep.issues if i.severity != "info"]
+        kids = _by_gid(fabric, rep.new_ids)
+        if len(kids) != 1 or len(parts_of(kids[0].geometry())) != len(polys):
+            raise EditError("Nothing was saved, because the merged parcel couldn't be built. "
+                            + "; ".join(i.message for i in rep.issues))
+        kid = kids[0]
+        values = {}
+        if keep_number:
+            values = PN.number_fields(keep_number)
+            donor = next((p for p in parents if p["ParcelNumber"] == keep_number), None)
+            if donor is not None and donor["Name"]:
+                values["Name"] = donor["Name"]
+        elif ptype in fabric.number_types:
+            try:
+                PN.number_new(fabric, [kid])
+                values = {k: kid[k] for k in ("ParcelNumber", "Section", "Township", "Range", "ParcelID",
+                                              "ParcelSeq", "SplitNo")}
+            except PN.NumberingNotSetUp as e:
+                res.messages.append("merged parcel not numbered: %s" % e)
+        for k, v in values.items():
+            ed.change(fabric.parcels, kid.id(), k, v)
         update_record_footprint(fabric, record, ed)
-    kid = fabric.parcels.getFeature(kid.id())
-    res.children = [kid["ParcelNumber"] or kid["Name"] or "#%d" % kid.id()]
-    L.add(fabric, record, "Merge", parents, [kid])
+        kid = fabric.parcels.getFeature(kid.id())
+        res.children = [kid["ParcelNumber"] or kid["Name"] or "%d polygon(s)" % len(polys)]
+        L.add(fabric, record, "Merge", parents, [kid])
     _dates(fabric, [record])
     return res
+
+
+def separate_parcel(fabric, parent, record, remainder_keeps=True):
+    """Make each polygon of a multi-polygon parcel its own parcel (the largest may keep the number)."""
+    _require_record(record)
+    _require_current(fabric, parent)
+    polys = sorted(parts_of(parent.geometry()), key=lambda p: -_seg(p).area())
+    if len(polys) < 2:
+        raise EditError("That parcel is a single polygon.")
+    return replace_parcel(fabric, parent, [], [], record, "Separate",
+                          [_seg(polys[0]).pointOnSurface()] if remainder_keeps else None)
 
 
 def retire_orphan_points(fabric, area, record, ed, ptype=None):

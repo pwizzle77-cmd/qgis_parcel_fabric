@@ -12,6 +12,7 @@ VERIFY BEFORE 1.0 (against a fabric exported from Pro):
 
 import json
 import os
+import re
 import uuid
 
 from qgis.core import (
@@ -215,7 +216,11 @@ def table_name(prefix, role):
     return p + names[role]
 
 
-def table_specs(prefix):
+# SQL Server has no curved multi-polygon type (Oracle is untested), so parcels stay single there
+MULTIPART_PROVIDERS = ("ogr", "postgres")
+
+
+def table_specs(prefix, multipart=True):
     """Every table of a fabric: (role, name, wkb, fields)."""
     W = Qgis.WkbType
     return [
@@ -223,7 +228,8 @@ def table_specs(prefix):
         (ROLE_RECORDS, table_name(prefix, ROLE_RECORDS), W.MultiPolygon, RECORD_FIELDS),
         (ROLE_POINTS, table_name(prefix, ROLE_POINTS), W.Point, POINT_FIELDS),
         (ROLE_CONNECTIONS, table_name(prefix, ROLE_CONNECTIONS), W.CompoundCurve, LINE_FIELDS),
-        (ROLE_PARCELS, table_name(prefix, ROLE_PARCELS), W.CurvePolygon, PARCEL_FIELDS),
+        (ROLE_PARCELS, table_name(prefix, ROLE_PARCELS),
+         W.MultiSurface if multipart else W.CurvePolygon, PARCEL_FIELDS),
         (ROLE_LINES, table_name(prefix, ROLE_LINES), W.CompoundCurve, LINE_FIELDS),
         (ROLE_LINEAGE, table_name(prefix, ROLE_LINEAGE), W.NoGeometry, LINEAGE_FIELDS),
     ]
@@ -303,6 +309,92 @@ def migrate_parcel_id(lyr):
     return len(changes)
 
 
+def convert_gpkg_parcels(path, table):
+    """Change a GeoPackage fabric's single-polygon parcels to multi-polygon.
+
+    The file is copied first; the change itself is one transaction.  Returns the backup's path.
+    """
+    import datetime
+    import sqlite3
+    from osgeo import gdal, ogr
+    backup = "%s.before-multipart-%s.gpkg" % (
+        os.path.splitext(path)[0], datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    if os.path.exists(backup):
+        raise RuntimeError("%s already exists" % backup)
+    src = sqlite3.connect(path)
+    dst = sqlite3.connect(backup)
+    try:
+        src.backup(dst)             # also right when part of the data is still in the write-ahead log
+    finally:
+        dst.close()
+        src.close()
+
+    def totals(ds):
+        n, area = 0, 0.0
+        for f in ds.GetLayerByName(table):
+            g = f.GetGeometryRef()
+            n += 1
+            area += g.GetArea() if g is not None else 0.0
+        return n, area
+
+    gdal.PushErrorHandler("CPLQuietErrorHandler")       # it warns while type and geometry differ
+    ds = None
+    try:
+        ds = gdal.OpenEx(path, gdal.OF_VECTOR | gdal.OF_UPDATE)
+        if ds is None:
+            raise RuntimeError("Could not open %s for editing" % path)
+        before = totals(ds)
+        if ds.StartTransaction() != 0:
+            raise RuntimeError("Could not start a transaction")
+        try:
+            lyr = ds.GetLayerByName(table)
+            lyr.ResetReading()
+            for fid in [f.GetFID() for f in lyr]:
+                f = lyr.GetFeature(fid)
+                g = f.GetGeometryRef()
+                if g is None or g.GetGeometryName() in ("MULTISURFACE", "MULTIPOLYGON"):
+                    continue
+                multi = ogr.Geometry(ogr.wkbMultiSurface)
+                multi.AssignSpatialReference(g.GetSpatialReference())
+                if multi.AddGeometry(g) != 0:
+                    raise RuntimeError("Parcel #%d can't be converted" % fid)
+                f.SetGeometry(multi)
+                if lyr.SetFeature(f) != 0:
+                    raise RuntimeError("Parcel #%d could not be saved: %s" % (fid, gdal.GetLastErrorMsg()))
+            ds.ExecuteSQL("UPDATE gpkg_geometry_columns SET geometry_type_name = 'MULTISURFACE' "
+                          "WHERE lower(table_name) = lower('%s')" % table.replace("'", "''"))
+            # the declared column type has to agree; SQLite has no ALTER for it
+            def one(sql):
+                rs = ds.ExecuteSQL(sql)
+                value = rs.GetNextFeature().GetField(0)
+                ds.ReleaseResultSet(rs)
+                return value
+            where = "WHERE type = 'table' AND lower(name) = lower('%s')" % table.replace("'", "''")
+            ddl = one("SELECT sql FROM sqlite_master " + where)
+            new_ddl, n = re.subn(r"\bCURVEPOLYGON\b", "MULTISURFACE", ddl, flags=re.I)
+            if n != 1:
+                raise RuntimeError("The Parcels table isn't laid out as expected")
+            version = int(one("PRAGMA schema_version"))
+            ds.ExecuteSQL("PRAGMA writable_schema = 1")
+            ds.ExecuteSQL("UPDATE sqlite_master SET sql = '%s' %s" % (new_ddl.replace("'", "''"), where))
+            ds.ExecuteSQL("PRAGMA schema_version = %d" % (version + 1))
+            ds.ExecuteSQL("PRAGMA writable_schema = 0")
+            if one("SELECT sql FROM sqlite_master " + where) != new_ddl:
+                raise RuntimeError("The Parcels table could not be changed")
+            after = totals(ds)
+            if after[0] != before[0] or abs(after[1] - before[1]) > 1e-6 * max(1.0, before[1]):
+                raise RuntimeError("The converted parcels don't match the originals")
+            if ds.CommitTransaction() != 0:
+                raise RuntimeError("Could not save: %s" % gdal.GetLastErrorMsg())
+        except Exception:
+            ds.RollbackTransaction()
+            raise
+    finally:
+        ds = lyr = f = g = None     # close the file
+        gdal.PopErrorHandler()
+    return backup
+
+
 # --------------------------------------------------------------------------
 # Connections (GeoPackage or any QGIS database connection)
 # --------------------------------------------------------------------------
@@ -364,7 +456,7 @@ def create_fabric(provider, name_or_path, schema, prefix, parcel_types, crs_auth
     crs = QgsCoordinateReferenceSystem(crs_authid)
     if not crs.isValid():
         raise RuntimeError("Unknown coordinate system %s" % crs_authid)
-    specs = table_specs(prefix)
+    specs = table_specs(prefix, provider in MULTIPART_PROVIDERS)
     for _role, name, _w, _f in specs:
         if conn.tableExists(schema, name):
             raise RuntimeError("Table %s already exists - pick another prefix" % name)

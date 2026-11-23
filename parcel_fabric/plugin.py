@@ -53,7 +53,9 @@ class ParcelFabricPlugin:
         self._add("divide", "Divide Parcel", lambda: self._window("divide"),
                   "Divide a parcel into equal areas, equal widths or set-area lots")
         self._add("merge", "Merge Parcels", lambda: self._window("merge"),
-                  "Combine touching parcels into one")
+                  "Combine parcels into one, touching or not")
+        self._add("split", "Separate Multi-Polygon Parcel", lambda: self._window("separate"),
+                  "Make each polygon of a parcel its own parcel")
         self._add("copy_parallel", "Copy Parallel", lambda: self._window("copy_parallel"),
                   "Offset copies of fabric lines (easements, right of way)")
         self._add("lineage", "Parcel Lineage", lambda: self._window("lineage"),
@@ -239,6 +241,7 @@ class ParcelFabricPlugin:
         from .ui.lineage_dialog import LineageDialog
         cls = {"subdivide": ED.SubdivideWindow, "address": AddressLotsDialog, "exchange": ExchangeDialog,
                "split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
+               "separate": ED.SeparateWindow,
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
                "history": HistoryDialog, "legal_writer": LegalWriterDialog,
                "compare": CompareDialog, "adjust": AdjustDialog}[kind]

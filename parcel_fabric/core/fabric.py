@@ -24,6 +24,7 @@ from qgis.core import (
     QgsRectangle,
     QgsUnitTypes,
     QgsVectorLayer,
+    QgsWkbTypes,
 )
 
 from . import schema as S
@@ -173,6 +174,30 @@ class Fabric:
     @property
     def lines(self):
         return self.layers[S.ROLE_LINES]
+
+    @property
+    def multipart(self):
+        """Can one parcel have several polygons?"""
+        return QgsWkbTypes.isMultiType(self.parcels.wkbType())
+
+    def convert_to_multipart(self):
+        """Let parcels have several polygons. Returns the path of the backup."""
+        if self.multipart:
+            raise RuntimeError("This fabric already allows multi-polygon parcels.")
+        if self.parcels.providerType() != "ogr" or ".gpkg" not in self.parcels.source().lower():
+            raise RuntimeError("Only GeoPackage fabrics can be converted.")
+        busy = [lx.name() for lx in self.edit_layers() if lx.isEditable()]
+        if busy:
+            raise RuntimeError("Save or discard the edits on %s first." % ", ".join(busy))
+        parts = QgsProviderRegistry.instance().decodeUri("ogr", self.parcels.source())
+        table = parts.get("layerName") or S.table_name(self.settings.get("prefix", ""), S.ROLE_PARCELS)
+        backup = S.convert_gpkg_parcels(parts["path"], table)
+        views = [lx for lx in QgsProject.instance().mapLayers().values()
+                 if lx.customProperty(PROP_FABRIC) == self.id and lx.customProperty(PROP_ROLE) == "history"]
+        for lx in [self.parcels] + views:       # reopen: a layer keeps the geometry type it was opened with
+            lx.setDataSource(lx.source(), lx.name(), "ogr")
+        self._configure_layers()
+        return backup
 
     @property
     def lineage(self):
@@ -520,12 +545,14 @@ class Fabric:
         return Course(LINE, az, dist)
 
     def add_traverse(self, target, legs, record_gid, dim_source="Record", rotation=0.0, scale=1.0,
-                     session=None):
+                     session=None, mapped=False):
         """Write foot-based traverse offsets as map-unit lines and end points in one edit.
 
         ``session`` writes into an edit the caller already opened, and does not save it.
+        ``mapped`` legs are already in map units.
         """
-        legs = self.traverse_map_legs(legs)
+        if not mapped:
+            legs = self.traverse_map_legs(legs)
         lyr = self.line_layer(target)
         pts = self.points
         new_pts = []

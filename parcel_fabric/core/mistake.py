@@ -187,9 +187,10 @@ def apply(fabric, record_id, drop_record):
 
 
 def _regrow(fabric, record_id, planned):
-    """(parcel feature, area it had before the split) for each remainder."""
+    """(parcel feature, area it had before the split, points in its polygons) for each remainder."""
     from qgis.core import QgsFeatureRequest, QgsGeometry
     from .fabric import quote
+    from .geomio import parts_of
     from .parcel_numbers import unfiltered
     if not planned["remainders"]:
         return []
@@ -202,7 +203,9 @@ def _regrow(fabric, record_id, planned):
             '"GlobalID" IN (%s)' % ", ".join(quote(g) for g in gids))))
         area = QgsGeometry.unaryUnion([QgsGeometry(f.geometry().constGet().segmentize()).buffer(fabric.tolerance, 4)
                                        for f in feats])
-        out.append((next(f for f in feats if f["GlobalID"] == gid), area))
+        points = [QgsGeometry(p.constGet().segmentize()).pointOnSurface().asPoint()
+                  for f in feats for p in parts_of(f.geometry())]
+        out.append((next(f for f in feats if f["GlobalID"] == gid), area, points))
     return out
 
 
@@ -215,18 +218,16 @@ def _owners(fabric, planned):
 
 
 def _rebuild(fabric, regrow, owners):
-    from qgis.core import QgsGeometry
     from . import lineage as L
     from .build import _dates, build_parcels, update_record_footprint
     from .fabric import EditSession
-    for f, area in regrow:
-        inside = QgsGeometry(f.geometry().constGet().segmentize()).pointOnSurface().asPoint()
+    for f, area, points in regrow:
         rep = build_parcels(fabric, f["ParcelType"], None, area.boundingBox(), number=False,
-                            adopt={f.id(): inside}, within=area.buffer(fabric.tolerance, 4))
+                            adopt={f.id(): points}, within=area.buffer(fabric.tolerance, 4))
         if not rep.rebuilt:
             raise MistakeError("The record's work was removed, but parcel %s couldn't be rebuilt to its outline before "
                                "the split. Run Check Fabric." % (f["ParcelNumber"] or f["Name"] or f.id()))
-    owners = owners | {f["CreatedByRecord"] for f, _area in regrow if f["CreatedByRecord"]}
+    owners = owners | {f["CreatedByRecord"] for f, _area, _points in regrow if f["CreatedByRecord"]}
     if owners:
         with EditSession([fabric.records], "Record footprints") as ed:
             for gid in owners:

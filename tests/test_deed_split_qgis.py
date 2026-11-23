@@ -116,7 +116,7 @@ class DeedSplitTests(_Deed):
         plan = self.plan(at(250, 0), (E_, 500), (S_, 100), (W_, 500), (N, 100))
         self.assertEqual(len(plan.remainders), 2)
         apply_deed_split(self.fab, plan, self.qcd)
-        self.assertEqual(sorted(round(f.geometry().area()) for f in self.parcels().values()), [50000, 75000, 75000])
+        self.assertEqual(sorted(round(f.geometry().area()) for f in self.parcels().values()), [50000, 150000])
 
     def test_curved_deed_course(self):
         r = 100.0

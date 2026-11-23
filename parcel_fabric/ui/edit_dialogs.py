@@ -351,13 +351,19 @@ class DivideWindow(_EditWindow):
 # --------------------------------------------------------------------------
 class MergeWindow(_EditWindow):
     TITLE = "Merge Parcels"
-    HELP = "Select two or more touching parcels of the same type."
+    HELP = "Select two or more parcels of the same type."
 
     def __init__(self, iface, manager, parent=None):
         super().__init__(iface, manager, parent)
         form = QFormLayout()
         self.number = QComboBox()
         form.addRow("Merged parcel number", self.number)
+        self.apart = QCheckBox("Join parcels that don't touch (one multi-polygon parcel)")
+        fab = manager.active
+        if fab is not None and not fab.multipart:
+            self.apart.setEnabled(False)
+            self.apart.setToolTip("Turn on multi-polygon parcels in Fabric Settings first")
+        form.addRow("", self.apart)
         self.lay.addLayout(form)
         tip = QLabel("The parents and the lines between them are retired by the active record; "
                      "the outside lines stay.")
@@ -376,7 +382,25 @@ class MergeWindow(_EditWindow):
                 self.number.addItem("Keep %s" % f["ParcelNumber"], str(f["ParcelNumber"]))
 
     def apply(self, fab, record):
-        return E.merge_parcels(fab, self.selected(), record, self.number.currentData())
+        return E.merge_parcels(fab, self.selected(), record, self.number.currentData(), self.apart.isChecked())
+
+
+# --------------------------------------------------------------------------
+class SeparateWindow(_EditWindow):
+    TITLE = "Separate Parcel"
+    HELP = "Select ONE multi-polygon parcel. Each of its polygons becomes its own parcel."
+
+    def __init__(self, iface, manager, parent=None):
+        super().__init__(iface, manager, parent)
+        self.keep = _remainder_choice(self.lay)
+        self.keep.setChecked(True)
+        self._finish_ui()
+
+    def apply(self, fab, record):
+        sel = self.selected()
+        if len(sel) != 1:
+            raise E.EditError("Select exactly one parcel to separate.")
+        return E.separate_parcel(fab, sel[0], record, self.keep.isChecked())
 
 
 # --------------------------------------------------------------------------

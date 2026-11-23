@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.9.0, experimental.** Test it on a copy of real data before
+**Status: 0.10.1, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.9.0.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.1.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -48,6 +48,10 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    within the Fabric Settings ratio, the ends meet within the snap tolerance (use Compass
    rule for a small gap), no courses cross and the parcel builds. An open traverse must
    start and end on fabric points, or go to Connections.
+   Traverse a parcel all the way round even where it adjoins others: corners within *Fit to
+   existing lines within* are held to existing corners and lines, courses along existing
+   lines reuse them (a neighbour's line is split at a new corner), and the preview reports
+   the largest adjustment. The lines keep the record's bearings and distances.
    **Clear** throws that preview away and leaves the courses. The lines are COGO-attributed true arcs.
    Start X/Y are in the fabric CRS. Traverse converts course offsets from the
    selected foot definition to the fabric's linear map units, so meter-based
@@ -105,7 +109,7 @@ features selected in **Parcels** (or **Parcel Lines**) and stay open for the nex
   record, paste or type the land it conveys, and pick the point of beginning. If the
   description commences elsewhere, pick that point instead and the tie calls are run to
   the POB. Select the parent parcel and press **Split Selected Parcel**. Deed corners
-  within *Fit to parent within* are held to the parent's corners and lines; a corner
+  within *Fit to existing lines within* are held to the parent's corners and lines; a corner
   further outside is refused. Courses inside the parent become new lines with the deed's
   bearings and distances; courses along the boundary reuse the parent's lines. Check the
   acreages and largest adjustment, then choose whether the remainder keeps the number.
@@ -118,6 +122,14 @@ features selected in **Parcels** (or **Parcel Lines**) and stay open for the nex
 - **Merge Parcels** – select touching parcels of one type; the lines between them
   and the parents are retired and one parcel is built. Keep one parent's number
   or take a new one.
+- **Multi-polygon parcels** – one parcel number can have several polygons. New GeoPackage
+  and PostgreSQL fabrics allow it; for an older GeoPackage fabric use **Fabric Settings >
+  General > Allow multi-polygon parcels**, which saves a copy of the file first. (SQL Server
+  has no curved multi-polygon type, so parcels stay single there.) Select the parcels and use
+  **Merge Parcels** with *Join parcels that don't touch*; **Separate Multi-Polygon Parcel**
+  makes each polygon its own parcel again. Misclose is the worst polygon's and the area is
+  the total. A deed split keeps every remaining polygon under the parent's number. Separate
+  a parcel before using Divide or Subdivide on it.
 - **Copy Parallel** – offset copies of selected lines (straight or curved) to the
   right or left, into a parcel type or Connections; corner points are added.
 - **Parcel Lineage** – parents and children of a parcel, current or retired, by
@@ -286,7 +298,7 @@ it is. For a throwaway fabric, delete the GeoPackage file.
 | --- | --- | --- |
 | `Records` | MultiPolygon | One per plat, deed or survey |
 | `Points` | Point | Parcel corners |
-| `Parcels` | CurvePolygon | All parcel types; `ParcelType`, `ParcelNumber` and its parts |
+| `Parcels` | MultiSurface (CurvePolygon in older fabrics) | All parcel types; `ParcelType`, `ParcelNumber` and its parts |
 | `Parcel_Lines` | CompoundCurve | Boundary lines with COGO dimensions and `ParcelType` |
 | `Connections` | CompoundCurve | Ties that carry COGO but bound no parcel |
 | `Parcel_Lineage` | none | Parent → child rows with the record and operation |

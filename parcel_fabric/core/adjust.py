@@ -60,8 +60,8 @@ def collect(fabric, scope, record_gid=None, extent=None, parcel_feats=None, use_
             return net
         box.grow(tol * 4)
         reqs = [QgsFeatureRequest().setFilterRect(box).setFilterExpression(CURRENT)]
-        rings = [QgsGeometry(QgsGeometry(p.geometry().constGet().segmentize()).constGet().boundary())
-                 for p in parcel_feats]
+        flat = [QgsGeometry(p.geometry().constGet().segmentize()) for p in parcel_feats]     # keeps them alive
+        rings = [QgsGeometry(g.constGet().boundary()) for g in flat]
     else:
         reqs = [QgsFeatureRequest().setFilterRect(extent).setFilterExpression(CURRENT)]
     feats = []

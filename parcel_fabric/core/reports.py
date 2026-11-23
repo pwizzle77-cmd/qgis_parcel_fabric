@@ -12,13 +12,15 @@ from . import units as U
 from .build import _ends, _single_curve
 from .cogo import CURVE, Course, loop_misclose
 from .fabric import CURRENT, Fabric, quote, type_expr
+from .geomio import parts_of
 from .topo import chain_ring
 
 
-def boundary_chain(fabric, parcel):
-    """The parcel's current boundary lines in walking order: [(feature, reversed)]."""
+def boundary_chain(fabric, parcel, poly=None):
+    """The current boundary lines of one of the parcel's polygons (default: its first) in walking
+    order: [(feature, reversed)]."""
     tol = fabric.tolerance
-    g = parcel.geometry()
+    g = poly or parts_of(parcel.geometry())[0]
     seg = QgsGeometry(g.constGet().segmentize())
     ring = QgsGeometry(seg.constGet().exteriorRing().clone())
     box = seg.boundingBox()
@@ -69,6 +71,10 @@ def _course_cells(c):
     return [U.azimuth_to_bearing(c.azimuth), "%.2f" % c.distance, ""]
 
 
+def _ratio_text(ratio):
+    return "closed" if math.isinf(ratio) else "1:{:,}".format(int(ratio))
+
+
 def closure_report(fabric, record_gid, path):
     rec = fabric.record_by_id(record_gid)
     if rec is None:
@@ -79,29 +85,37 @@ def closure_report(fabric, record_gid, path):
     rows_summary, blocks = [], []
     for p in parcels:
         name = str(p["ParcelNumber"] or p["Name"] or "#%d" % p.id())
-        chain = boundary_chain(fabric, p)
+        polys = parts_of(p.geometry())
         geom_area = QgsGeometry(p.geometry().constGet().segmentize()).area()
-        if chain is None:
-            blocks.append("<h3>%s</h3><p class=bad>Its boundary lines don't form one loop - run Check Fabric.</p>"
-                          % html.escape(name))
-            rows_summary.append((name, "", "", "%.3f" % (geom_area / 43560.0), ""))
-            continue
-        courses = [walked_course(f, rev) for f, rev in chain]
-        table = []
-        for i, ((f, rev), c) in enumerate(zip(chain, courses), 1):
-            cells = _course_cells(c)
-            table.append("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-                i, cells[0], cells[1], html.escape(cells[2]), html.escape(str(f["QPF_DimSource"] or ""))))
-        ms = loop_misclose([(Fabric.course_from_feature(f), rev) for f, rev in chain])
-        if ms is None:
-            close = "<p class=bad>Some lines have no record dimensions, so misclose can't be computed.</p>"
-            ratio_txt, carea = "", None
-        else:
-            dx, dy, per, carea = ms
-            mis = math.hypot(dx, dy)
-            ratio_txt = "closed" if mis < 1e-6 else "1:{:,}".format(int(per / mis))
-            close = "<p>Perimeter %.2f ft &middot; misclose %.3f ft %s &middot; precision <b>%s</b></p>" % (
-                per, mis, U.azimuth_to_bearing(math.atan2(dx, dy)) if mis > 1e-6 else "", ratio_txt)
+        tables, carea, worst, broken = [], 0.0, None, False
+        for k, poly in enumerate(polys, 1):
+            title = "<h4>Polygon %d of %d</h4>" % (k, len(polys)) if len(polys) > 1 else ""
+            chain = boundary_chain(fabric, p, poly)
+            if chain is None:
+                tables.append(title + "<p class=bad>Its boundary lines don't form one loop - run Check Fabric.</p>")
+                broken, carea = True, None
+                continue
+            courses = [walked_course(f, rev) for f, rev in chain]
+            table = []
+            for i, ((f, rev), c) in enumerate(zip(chain, courses), 1):
+                cells = _course_cells(c)
+                table.append("<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                    i, cells[0], cells[1], html.escape(cells[2]), html.escape(str(f["QPF_DimSource"] or ""))))
+            ms = loop_misclose([(Fabric.course_from_feature(f), rev) for f, rev in chain])
+            if ms is None:
+                close = "<p class=bad>Some lines have no record dimensions, so misclose can't be computed.</p>"
+                carea = None
+            else:
+                dx, dy, per, loop_area = ms
+                mis = math.hypot(dx, dy)
+                ratio = math.inf if mis < 1e-6 else per / mis
+                worst = ratio if worst is None else min(worst, ratio)
+                carea = None if carea is None else carea + loop_area
+                close = "<p>Perimeter %.2f ft &middot; misclose %.3f ft %s &middot; precision <b>%s</b></p>" % (
+                    per, mis, U.azimuth_to_bearing(math.atan2(dx, dy)) if mis > 1e-6 else "", _ratio_text(ratio))
+            tables.append("%s<table><tr><th>#</th><th>Bearing</th><th>Distance</th><th>Curve</th>"
+                          "<th>Source</th></tr>%s</table>%s" % (title, "".join(table), close))
+        ratio_txt = "" if worst is None or broken else _ratio_text(worst)
         stated = p["StatedArea"]
         stated_txt = ""
         try:
@@ -113,8 +127,7 @@ def closure_report(fabric, record_gid, path):
         areas = "<p>Area by record dimensions %s &middot; by coordinates %.3f ac (%s sq ft)%s</p>" % (
             "%.3f ac" % (carea / 43560.0) if carea else "-", geom_area / 43560.0, "{:,.0f}".format(geom_area),
             " &middot; stated %s" % stated_txt if stated_txt else "")
-        blocks.append("<h3>%s</h3><table><tr><th>#</th><th>Bearing</th><th>Distance</th><th>Curve</th>"
-                      "<th>Source</th></tr>%s</table>%s%s" % (html.escape(name), "".join(table), close, areas))
+        blocks.append("<h3>%s</h3>%s%s" % (html.escape(name), "".join(tables), areas))
         rows_summary.append((name, ratio_txt, "%.3f" % (carea / 43560.0) if carea else "",
                              "%.3f" % (geom_area / 43560.0), stated_txt))
     doc = rec["QPF_DocumentURL"]

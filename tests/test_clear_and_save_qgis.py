@@ -247,7 +247,12 @@ class SaveGateTests(_Two):
     def test_unbuildable_parcel_cannot_be_saved(self):
         self.load(*SQUARE)
         self.save()
-        self.dock._create()                                    # the same lines again can't build
+        self.dock._create()                                    # the same parcel again
+        self.assertFalse(self.dock.save_btn.isEnabled())
+        self.assertIn("already in the fabric", self.dock._staged_why)
+        self.dock._clear()
+        self.load(("N 0 E", 60), ("N 90 E", 160), ("S 0 E", 60), ("S 90 W", 160))     # laps over the first
+        self.dock._create()
         self.assertFalse(self.dock.save_btn.isEnabled())
         self.assertIn("couldn't be built", self.dock._staged_why)
         self.dock._clear()

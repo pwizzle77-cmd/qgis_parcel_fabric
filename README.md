@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.8.5, experimental.** Test it on a copy of real data before
+**Status: 0.9.0, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.8.5.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.9.0.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
 
@@ -25,13 +25,16 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    survey or international feet. **Add Fabric to Map** opens an existing one.
 2. **Fabric Settings** – set the document folder and how files are named
    (tokens `{type} {book} {page} {name} {year} {date} {id}`, e.g. folder
-   `{type}/Book {book}`, file `{type}_B{book}_P{page}`), and pick the PLSS sections
-   layer and its section, township and range fields for parcel numbers.
+   `{type}/Book {book}`, file `{type}_B{book}_P{page}`), and, if you
+   don't want the default, choose your own PLSS layer(s) for parcel numbers (see below).
 3. **Records** panel – **New Record** with type, book and page (the name fills in
    if left blank) and **Attach...** a scan: it is copied into the document folder,
    sub-folders are created and the file is named from the record. **Edit...**
    corrects a record; if the book or page changes, the stored file can be renamed
-   to match. **Document** opens the scan. New lines, points and parcels are
+   to match. **Document** opens the scan. **Remove Mistake...** permanently deletes
+   the lines, points and parcels the selected record created and brings back what it
+   retired; the record stays. It refuses if a later record builds on it, and keeps
+   boundaries other parcels share. New lines, points and parcels are
    stamped with the active record; hand-digitized features get it too.
 3. **Traverse** – pick or type the point of beginning (snaps to fabric points),
    then type courses (`N 45-30-15 E`, `S45°30'15"W`; distances in feet, or add
@@ -39,8 +42,13 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    chord, delta or tangent length, and say whether the bearing is the chord,
    tangent, radial, or tangent to the previous course. **Paste description...**
    uses COGO Workbench's parser and review step. The panel shows misclose, ratio
-   and area live; Compass rule adjustment is optional. **Create lines** writes
-   COGO-attributed lines (true arcs) and corner points, and can build the parcel.
+   and area live; Compass rule adjustment is optional. Nothing is written until
+   **Save to Record**, which stays off until there is an active record and the
+   traverse is good: misclose within the Fabric Settings ratio, ends meeting within
+   the snap tolerance (use Compass rule for a small gap) and no crossing courses.
+   An open traverse must start and end on fabric points, or go to Connections.
+   Saving writes COGO-attributed lines (true arcs) and corner points and builds the
+   parcel; if the parcel can't be built, nothing is saved.
    Start X/Y are in the fabric CRS. Traverse converts course offsets from the
    selected foot definition to the fabric's linear map units, so meter-based
    fabrics draw at the correct size too. Record COGO dimensions, closure and
@@ -51,7 +59,21 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    A seed polygon (`IsSeed = 1`) inside a loop passes its name on. Misclose and
    `CalculatedArea` come from the record dimensions. The record's footprint and
    `ParcelCount` update. Building again rebuilds; it never duplicates.
-   New parcels are numbered as they are built (if the PLSS layer is set).
+   New parcels are numbered as they are built (PLSS comes from the BLM service unless you chose layers).
+   **PLSS source.** Online PLSS data is split into layers (townships/ranges and
+   sections), so the plugin looks the parcel's point up in each layer: the section
+   from the sections layer, township + N/S + range from the township layer. Out of
+   the box it uses the **BLM National PLSS CadNSDI** REST service
+   (`gis.blm.gov/arcgis/rest/services/Cadastral/BLM_Natl_PLSS_CadNSDI/MapServer`,
+   layer 2 sections `FRSTDIVNO`; layer 1 townships `TWNSHPNO`, `TWNSHPDIR`, `RANGENO`).
+   Those two layers are added (unchecked) to the fabric's layer group. Only the
+   features at each parcel are requested, so nothing national is downloaded.
+   Fabric Settings > Parcel numbers: untick *Use the BLM National PLSS service* to
+   pick your own sections layer and (optionally) a township layer with field
+   mappings. Leave the township layer empty to use one combined layer with section,
+   township, range (and optional N/S) fields - existing setups keep working.
+   Needs internet for the default; if it's unreachable, parcels are built un-numbered
+   with a message and can be numbered later.
 5. **Assign Parcel Numbers** – numbers look like `12-4S-16-02942-000`. Select
    parcels, then either give them the next unused ID in their
    section-township-range (split `000`), or number them as splits of a parent:
@@ -79,6 +101,14 @@ features selected in **Parcels** (or **Parcel Lines**) and stay open for the nex
   in two (old line retired; halves keep the record distance in proportion and point
   back with `ParentLineID`). The pieces are built and numbered as splits of the
   parent (`-001`, `-002`...).
+- **Split by a deed** (in **Traverse**) – set the deed (e.g. a quitclaim) as the active
+  record, paste or type the land it conveys, and pick the point of beginning. If the
+  description commences elsewhere, pick that point instead and the tie calls are run to
+  the POB. Select the parent parcel and press **Split Selected Parcel**. Deed corners
+  within *Fit to parent within* are held to the parent's corners and lines; a corner
+  further outside is refused. Courses inside the parent become new lines with the deed's
+  bearings and distances; courses along the boundary reuse the parent's lines. Check the
+  acreages and largest adjustment, then choose whether the remainder keeps the number.
 - **Divide Parcel** – equal areas, equal widths, or set-area lots with the rest as a
   remainder, with cut lines parallel to a bearing (or **Pick a Line**). **Preview**
   shows the cuts and acreages first.
@@ -256,7 +286,7 @@ same parcel. Installing triggers needs a login that may create them.
 | `Parcel_Lineage` | none | Parent → child rows with the record and operation |
 | `QPF_Settings` | none | Parcel types, foot, tolerance, documents, numbering |
 
-Features are retired (`RetiredByRecord`), never deleted. Pro keeps one table per
+Features are retired (`RetiredByRecord`), never deleted, except by Remove Mistake. Pro keeps one table per
 parcel type; here they share one, so an export to Pro splits on `ParcelType`.
 Plugin fields are `ParcelType`, `ParcelNumber`, `Section`, `Township`, `Range`,
 `ParcelID`, `ParcelSeq`, `SplitNo`, `ParentNumber`, `Book`, `Page` and the `QPF_` fields. **To verify against a fabric exported from Pro before 1.0:** the

@@ -168,6 +168,40 @@ class TraverseUnitsTests(unittest.TestCase):
         self.assertEqual(fabric.lines.featureCount(), 0)
         self.assertEqual(fabric.points.featureCount(), 0)
 
+    def test_web_mercator_is_rejected(self):
+        from qgis.core import QgsCoordinateReferenceSystem as Crs
+        from parcel_fabric.core.geomio import unit_word
+        fabric = self.fabric('EPSG:3857')
+        self.traverse(fabric)
+        self.assertIn('Web Mercator', self.dock.result_lbl.text())
+        self.assertFalse(self.dock.save_btn.isEnabled())
+        self.assertIsNone(unit_word(Crs('EPSG:3857')))
+        self.assertIsNone(unit_word(Crs('EPSG:4326')))
+        self.assertEqual(unit_word(Crs('EPSG:2238')), 'feet')
+        self.assertEqual(unit_word(Crs('EPSG:26917')), 'meters')
+
+    def test_picked_start_keeps_every_digit(self):
+        from qgis.core import QgsPointXY
+        fabric = self.fabric('EPSG:2238')
+        self.traverse(fabric)
+        x, y = 2541788.540861726, 343618.4664914012
+        self.dock._picked(QgsPointXY(x, y), '')
+        self.assertEqual(self.dock._start(), (x, y))
+        self.dock._create()
+        self.assertTrue(any(p.geometry().asPoint() == QgsPointXY(x, y) for p in fabric.points.getFeatures()))
+
+    def test_new_fabric_dialog_refuses_web_mercator(self):
+        from unittest.mock import patch
+        from qgis.core import QgsCoordinateReferenceSystem as Crs
+        from parcel_fabric.ui import fabric_dialog as FD
+        dlg = FD.NewFabricDialog()
+        for authid, ok in (('EPSG:3857', False), ('EPSG:4326', False), ('EPSG:2238', True)):
+            dlg.crs.setCrs(Crs(authid))
+            dlg.result_value = None
+            with patch.object(dlg.storage, 'value', return_value=('ogr', 'x.gpkg', '')), patch.object(FD, 'QMessageBox'):
+                dlg._ok()
+            self.assertEqual(dlg.result_value is not None, ok, authid)
+
     def test_compare_uses_map_geometry_but_reports_feet_and_acres(self):
         fabric = self.fabric()
         self.traverse(fabric)
@@ -183,6 +217,7 @@ class TraverseUnitsTests(unittest.TestCase):
 
     def test_compass_adjustment_preserves_record_bearings_after_unit_conversion(self):
         fabric = self.fabric()
+        fabric.settings['misclose_warn_ratio'] = '500'      # let 1:599 through to be adjusted
         courses = self.square()
         courses[-1].distance = 199
         self.traverse(fabric, courses)

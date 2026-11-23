@@ -1,21 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Traverse: enter record courses, check closure, write fabric lines."""
+"""Traverse: enter record courses, check closure, save good ones to the active record.
+
+Courses are only a preview on the map until they pass and are saved.
+"""
 
 import math
 
-from qgis.core import Qgis, QgsGeometry, QgsLineString, QgsPoint
+from qgis.core import Qgis, QgsGeometry, QgsLineString, QgsPoint, QgsPointXY, QgsPolygon
 from qgis.gui import QgsRubberBand, QgsVertexMarker
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDockWidget, QFormLayout, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDockWidget, QDoubleSpinBox, QFormLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core import cogo as C
 from ..core import units as U
-from ..core.build import build_parcels
+from ..core.build import _dates, build_parcels
+from ..core.deed_split import apply_deed_split, plan_deed_split
+from ..core.edits import EditError
+from ..core.fabric import CONNECTIONS, EditSession
 from .issues_dialog import IssuesDialog
 from .legal_dialog import LegalDialog
 from .map_tools import PickPointTool
@@ -37,6 +43,7 @@ class TraverseDock(QDockWidget):
         self.canvas = iface.mapCanvas()
         self.result = None
         self.courses = []
+        self.tie = []                   # calls from the point of commencement to the POB
         self._filling = False
 
         self.band = QgsRubberBand(self.canvas, Qgis.GeometryType.Line)
@@ -77,6 +84,12 @@ class TraverseDock(QDockWidget):
         self.start_name = QLabel()
         self.start_name.setStyleSheet("color: palette(mid);")
         form.addRow("", self.start_name)
+        self.use_tie = QCheckBox()
+        self.use_tie.setToolTip("Pick the point of commencement (e.g. the section corner) as the start point; "
+                                "the description's tie calls are run from it to the point of beginning")
+        self.use_tie.toggled.connect(self._recompute)
+        self.use_tie.hide()
+        form.addRow("", self.use_tie)
         self.g2g = QLabel()
         self.g2g.setWordWrap(True)
         form.addRow("Ground to grid", self.g2g)
@@ -108,6 +121,8 @@ class TraverseDock(QDockWidget):
         self.adjust = QComboBox()
         self.adjust.addItem("No adjustment", "none")
         self.adjust.addItem("Compass rule", "compass")
+        self.adjust.currentIndexChanged.connect(lambda *_: self._recompute())
+        self.target.currentIndexChanged.connect(lambda *_: self._recompute())
         self.dimsrc = QComboBox()
         self.dimsrc.addItems(["Record", "Measured", "Computed", "Estimated"])
         self.dimsrc.setToolTip("Where these dimensions came from (saved on each line)")
@@ -124,11 +139,14 @@ class TraverseDock(QDockWidget):
         lay.addWidget(self.result_lbl)
 
         cr = QHBoxLayout()
-        self.build_after = QCheckBox("Build parcel after creating")
+        self.build_after = QCheckBox("Build parcel after saving")
         self.build_after.setChecked(True)
-        create = QPushButton("Create lines")
-        create.setDefault(True)
-        create.clicked.connect(self._create)
+        self.save_btn = QPushButton("Save to Record")
+        self.save_btn.setToolTip("Write the lines and points to the active record. Available once the "
+                                 "traverse is good; until then it is only a preview.")
+        self.save_btn.setDefault(True)
+        self.save_btn.setEnabled(False)
+        self.save_btn.clicked.connect(self._create)
         cmp_btn = QPushButton("Compare to Selected Polygon")
         cmp_btn.setToolTip("How well this traverse fits the polygon selected in the active layer "
                            "(e.g. the existing county parcel)")
@@ -136,8 +154,24 @@ class TraverseDock(QDockWidget):
         cr.addWidget(self.build_after)
         cr.addStretch(1)
         cr.addWidget(cmp_btn)
-        cr.addWidget(create)
+        cr.addWidget(self.save_btn)
         lay.addLayout(cr)
+        sr = QHBoxLayout()
+        self.fit = QDoubleSpinBox()
+        self.fit.setRange(0.01, 50)
+        self.fit.setValue(1)
+        self.fit.setSuffix(" ft")
+        self.fit.setToolTip("Deed corners this close to the parent's corners or lines are held to them; "
+                            "corners further outside the parent are refused")
+        self.split_btn = QPushButton("Split Selected Parcel...")
+        self.split_btn.setToolTip("These courses are the land a deed conveys out of the selected fabric parcel")
+        self.split_btn.setEnabled(False)
+        self.split_btn.clicked.connect(self._split)
+        sr.addStretch(1)
+        sr.addWidget(QLabel("Fit to parent within"))
+        sr.addWidget(self.fit)
+        sr.addWidget(self.split_btn)
+        lay.addLayout(sr)
         self.setWidget(w)
 
         manager.activeFabricChanged.connect(self._fabric_changed)
@@ -236,7 +270,15 @@ class TraverseDock(QDockWidget):
             self._add_row("Line")
         self._recompute()
 
+    def _set_tie(self, tie):
+        self.tie = list(tie)
+        self.use_tie.setText("Start point is the point of commencement (run %d tie call(s) to the POB)"
+                             % len(self.tie))
+        self.use_tie.setVisible(bool(self.tie))
+        self.use_tie.setChecked(bool(self.tie))
+
     def _clear(self):
+        self._set_tie([])
         self.table.setRowCount(0)
         self._add_row("Line")
 
@@ -294,10 +336,16 @@ class TraverseDock(QDockWidget):
         return courses, errors
 
     def _start(self):
+        """The point of beginning: the start point, or the end of the tie calls from it."""
         try:
-            return float(self.x.text().replace(",", "")), float(self.y.text().replace(",", ""))
+            xy = float(self.x.text().replace(",", "")), float(self.y.text().replace(",", ""))
         except ValueError:
             return None
+        if not (self.tie and self.use_tie.isChecked()):
+            return xy
+        scale, rot = self._record_g2g()
+        res = C.compute(xy, self.tie, close_to=False, rotation=math.radians(rot), scale=scale)
+        return self.manager.active.traverse_map_legs(res.legs)[-1].end
 
     def _record_g2g(self):
         rec = self.manager.active_record()
@@ -317,6 +365,8 @@ class TraverseDock(QDockWidget):
     def _recompute(self):
         fab = self.manager.active
         self.result = None
+        self.save_btn.setEnabled(False)
+        self.split_btn.setEnabled(False)
         self.band.reset(Qgis.GeometryType.Line)
         self.gap.reset(Qgis.GeometryType.Line)
         if fab is None:
@@ -327,7 +377,11 @@ class TraverseDock(QDockWidget):
             scale, U.format_angle(rot, 1) if rot >= 0 else "-" + U.format_angle(-rot, 1),
             rec["Name"])) if rec is not None and (scale != 1.0 or rot != 0.0)
             else "none (set QPF_ScaleFactor / QPF_Rotation on the record)")
-        start = self._start()
+        try:
+            start = self._start()
+        except ValueError as e:
+            self.result_lbl.setText("<span style='color:#b3261e'>%s</span>" % e)
+            return
         courses, errors = self._courses(fab)
         self.courses = courses
         if start is None:
@@ -346,11 +400,50 @@ class TraverseDock(QDockWidget):
             res = C.compute(start, courses, close_to=start if self.closed.isChecked() else False,
                             rotation=math.radians(rot), scale=scale)
             self._draw(fab, res, start)
+            why = self._blocker(fab, res, start)
         except ValueError as e:
             self.result_lbl.setText("<span style='color:#b3261e'>%s</span>" % e)
             return
         self.result = res
-        self.result_lbl.setText(self._summary(fab, res))
+        self.save_btn.setEnabled(not why)
+        self.split_btn.setEnabled(not why and self.closed.isChecked())
+        self.result_lbl.setText(self._summary(fab, res) + (
+            "<br><span style='color:#b3261e'>Preview only, can't be saved: %s</span>" % why if why
+            else "<br>Preview only until you press Save to Record."))
+
+    def _final(self, res, start):
+        """The traverse as it would be saved (compass rule applied if chosen)."""
+        if not (self.closed.isChecked() and self.adjust.currentData() == "compass" and res.misclose > 1e-9):
+            return res
+        scale, rot = self._record_g2g()
+        out = C.compute(start, C.compass_rule(res, start), close_to=start, rotation=math.radians(rot), scale=scale)
+        # adjusted geometry, but the lines keep the RECORD dimensions
+        for leg, orig_leg in zip(out.legs, res.legs):
+            leg.course = orig_leg.course
+            leg.record_az = orig_leg.chord_az
+        return out
+
+    def _blocker(self, fab, res, start):
+        """Why this traverse isn't good enough to save ('' when it is)."""
+        if self.manager.active_record() is None:
+            return "set an active record first (Records panel)."
+        legs = fab.traverse_map_legs(self._final(res, start).legs)
+        a, b = legs[0].start, legs[-1].end
+        if not self.closed.isChecked():
+            if self.target.currentText() == CONNECTIONS or (
+                    fab.find_point(*a) is not None and fab.find_point(*b) is not None):
+                return ""
+            return "an open traverse must start and end on existing fabric points."
+        if res.misclose > 1e-6 and res.ratio < fab.warn_ratio:
+            return "misclose 1:%s is worse than 1:%s (Fabric Settings)." % (
+                "{:,}".format(int(res.ratio)), "{:,}".format(int(fab.warn_ratio)))
+        if max(abs(a[0] - b[0]), abs(a[1] - b[1])) > fab.tolerance:
+            return "the ends don't meet. Choose Compass rule to close the gap."
+        ring = self._map_points(fab, legs)
+        ring[-1] = ring[0].clone()
+        if not QgsGeometry(QgsLineString(ring)).isSimple():
+            return "the courses cross each other."
+        return ""
 
     def _summary(self, fab, res):
         lines = ["%d course(s), length %.2f ft" % (len(res.legs), res.perimeter)]
@@ -375,9 +468,9 @@ class TraverseDock(QDockWidget):
                                     QgsProject.instance())
         return xf.transform(QgsPointXY(*xy))
 
-    def _draw(self, fab, res, start):
+    @staticmethod
+    def _map_points(fab, legs):
         pts = []
-        legs = fab.traverse_map_legs(res.legs)
         for leg in legs:
             g = fab.leg_geometry(leg)
             seg = g.constGet().segmentize()
@@ -386,6 +479,11 @@ class TraverseDock(QDockWidget):
                 if pts and abs(pts[-1].x() - p.x()) < 1e-9 and abs(pts[-1].y() - p.y()) < 1e-9:
                     continue
                 pts.append(QgsPoint(p.x(), p.y()))
+        return pts
+
+    def _draw(self, fab, res, start):
+        legs = fab.traverse_map_legs(res.legs)
+        pts = self._map_points(fab, legs)
         crs = fab.points.crs()
         self.band.setToGeometry(QgsGeometry(QgsLineString(pts)), crs)
         if self.closed.isChecked() and res.misclose > 1e-6:
@@ -393,8 +491,8 @@ class TraverseDock(QDockWidget):
             self.gap.setToGeometry(QgsGeometry(QgsLineString([QgsPoint(*e), QgsPoint(*start)])), crs)
 
     def _picked(self, pt, name):
-        self.x.setText("%.4f" % pt.x())
-        self.y.setText("%.4f" % pt.y())
+        self.x.setText(repr(pt.x()))        # every digit, so the start is exactly the picked point
+        self.y.setText(repr(pt.y()))
         self.start_name.setText("Starts on %s" % name if name else "")
         self.iface.actionPan().trigger()
         self._recompute()
@@ -407,7 +505,7 @@ class TraverseDock(QDockWidget):
         dlg = LegalDialog(fab.foot_m, self)
         if not dlg.exec() or not dlg.courses:
             return
-        self.load_courses(dlg.courses)
+        self.load_courses(dlg.courses, dlg.tie)
 
     def _read_deed(self):
         fab = self.manager.active
@@ -416,11 +514,13 @@ class TraverseDock(QDockWidget):
         from .deed_reader_dialog import DeedReaderDialog
         dlg = DeedReaderDialog(self.iface, self.manager, self)
         if dlg.exec() and dlg.courses:
-            self.load_courses(dlg.courses)
+            self.load_courses(dlg.courses, dlg.tie)
             self.dimsrc.setCurrentText("Record")
 
-    def load_courses(self, courses):
-        """Replace the grid with these courses (from a description or a deed)."""
+    def load_courses(self, courses, tie=()):
+        """Replace the grid with these courses (from a description or a deed).
+        ``tie``: the calls from the point of commencement to the POB."""
+        self._set_tie(tie)
         self.table.setRowCount(0)
         for c in courses:
             if c.is_curve:
@@ -457,7 +557,6 @@ class TraverseDock(QDockWidget):
                 p = seg.pointN(i)
                 pts.append(QgsPoint(p.x(), p.y()))
         pts.append(QgsPoint(pts[0].x(), pts[0].y()))
-        from qgis.core import QgsPolygon
         poly = QgsGeometry(QgsPolygon(QgsLineString(pts)))
         m = measure(poly, ref)
         factor = fab.map_units_per_foot
@@ -480,40 +579,105 @@ class TraverseDock(QDockWidget):
         if self.result is None:
             QMessageBox.warning(self, "Traverse", "Fix the start point and courses first.")
             return
-        rec = self.manager.active_record_id
-        if not rec:
-            if QMessageBox.question(
-                    self, "Traverse", "There is no active record, so these lines won't belong to "
-                    "any plat or deed. Create them anyway?") != QMessageBox.StandardButton.Yes:
-                return
         start = self._start()
         res = self.result
-        scale, rot = self._record_g2g()
-        if self.closed.isChecked() and self.adjust.currentData() == "compass" and res.misclose > 1e-9:
-            adj = C.compass_rule(res, start)
-            res = C.compute(start, adj, close_to=start, rotation=math.radians(rot), scale=scale)
-            # adjusted geometry, but the lines keep the RECORD dimensions
-            for leg, orig_leg in zip(res.legs, self.result.legs):
-                leg.course = orig_leg.course
-                leg.record_az = orig_leg.chord_az
-        target = self.target.currentText()
-        try:
-            n_lines, n_pts = fab.add_traverse(target, res.legs, rec, self.dimsrc.currentText(),
-                                              math.radians(rot), scale)
-        except Exception as e:
-            QMessageBox.critical(self, "Traverse", "Could not create lines: %s" % e)
+        why = self._blocker(fab, res, start)
+        if why:
+            QMessageBox.warning(self, "Traverse", "This traverse can't be saved: " + why)
             return
-        msg = "%d line(s) and %d point(s) added to %s." % (n_lines, n_pts, target)
-        if self.build_after.isChecked() and self.closed.isChecked() and target in fab.parcel_types and rec:
-            try:
-                rep = build_parcels(fab, target, rec)
-                msg += " Build: " + rep.summary()
-                if rep.issues:
-                    IssuesDialog(self.iface, "Build %s" % target, rep.summary(), rep.issues,
-                                 fab.records.crs()).show()
-            except Exception as e:
-                msg += " Build failed: %s" % e
+        rec = self.manager.active_record_id
+        scale, rot = self._record_g2g()
+        final = self._final(res, start)
+        target = self.target.currentText()
+        build = self.build_after.isChecked() and self.closed.isChecked() and target in fab.parcel_types
+        rep = None
+        try:
+            # one edit: if the parcel can't be built, the lines and points aren't kept either
+            with EditSession([fab.parcels, fab.line_layer(target), fab.points, fab.records], "Save traverse"):
+                n_lines, n_pts = fab.add_traverse(target, final.legs, rec, self.dimsrc.currentText(),
+                                                  math.radians(rot), scale)
+                if build:
+                    rep = build_parcels(fab, target, rec)
+                    self._check_build(fab, final, rep)
+            _dates(fab, [rec])
+        except Exception as e:
+            QMessageBox.critical(self, "Traverse", "Nothing was saved: %s" % e)
+            if rep is not None and rep.issues:
+                IssuesDialog(self.iface, "Build %s" % target, rep.summary(), rep.issues,
+                             fab.records.crs()).show()
+            self.canvas.refresh()
+            return
+        msg = "%d line(s) and %d point(s) saved to %s." % (n_lines, n_pts, target)
+        if rep is not None:
+            msg += " Build: " + rep.summary()
+            if rep.issues:
+                IssuesDialog(self.iface, "Build %s" % target, rep.summary(), rep.issues,
+                             fab.records.crs()).show()
+        self._clear()           # saving the same courses twice would duplicate the lines
         self.iface.messageBar().pushSuccess("Parcel Fabric", msg)
         self.canvas.refresh()
-        self.band.reset(Qgis.GeometryType.Line)
-        self.gap.reset(Qgis.GeometryType.Line)
+
+    def _split(self):
+        fab = self.manager.active
+        if fab is None:
+            return
+        self._recompute()
+        if not self.split_btn.isEnabled():
+            return
+        sel = list(fab.parcels.getSelectedFeatures())
+        if len(sel) != 1:
+            QMessageBox.information(self, "Split Parcel", "Select ONE parcel in the fabric's Parcels layer: the "
+                                    "parent this deed conveys land out of. It must already be in the fabric.")
+            return
+        parent = sel[0]
+        start = self._start()
+        scale, rot = self._record_g2g()
+        final = self._final(self.result, start)
+        factor = fab.map_units_per_foot
+        title = "Split Parcel"
+        try:
+            plan = plan_deed_split(fab, parent, fab.traverse_map_legs(final.legs), self.fit.value() * factor)
+            acre = 43560.0 * factor ** 2
+            moved = max((m[1] for m in plan.moved), default=0.0) / factor
+            text = ("Parent: %s\n\nDeed piece: %.3f acres by the deed, %.3f fitted to the parent.\n"
+                    "Remainder: %.3f acres.\nLargest corner adjustment: %.2f ft.\n"
+                    "New lines: %d with the deed's dimensions; %d course(s) follow the parent's boundary." % (
+                        parent["ParcelNumber"] or parent["Name"] or "#%d" % parent.id(), final.area / 43560.0,
+                        plan.piece.area() / acre, plan.left / acre, moved,
+                        len(plan.inside), len(plan.along)))
+            if len(plan.remainders) > 1:
+                text += ("\n\nThe deed leaves %d separate remainder pieces. Only the largest can keep the "
+                         "parent's number; the others become new parcels." % len(plan.remainders))
+            box = QMessageBox(QMessageBox.Icon.Question, title, text, parent=self)
+            keep = box.addButton("Remainder keeps the number", QMessageBox.ButtonRole.AcceptRole)
+            new = box.addButton("All pieces are new", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(keep)
+            box.exec()
+            if box.clickedButton() not in (keep, new):
+                return
+            res = apply_deed_split(fab, plan, self.manager.active_record_id, box.clickedButton() is keep,
+                                   self.dimsrc.currentText(), math.radians(rot), scale)
+        except EditError as e:
+            QMessageBox.warning(self, title, str(e))
+            return
+        except Exception as e:          # keep QGIS alive; show what happened
+            QMessageBox.critical(self, title, "Nothing was saved: %s" % e)
+            return
+        fab.parcels.removeSelection()
+        self._clear()
+        self.canvas.refresh()
+        if res.issues:
+            IssuesDialog(self.iface, title, res.summary(), res.issues, fab.records.crs()).show()
+        else:
+            self.iface.messageBar().pushSuccess("Parcel Fabric", "Split: " + res.summary())
+
+    def _check_build(self, fab, res, rep):
+        ring = self._map_points(fab, fab.traverse_map_legs(res.legs))
+        ring[-1] = ring[0].clone()
+        poly = QgsGeometry(QgsPolygon(QgsLineString(ring)))
+        bad = [i for i in rep.issues if i.severity == "error" and i.x is not None
+               and poly.contains(QgsGeometry.fromPointXY(QgsPointXY(i.x, i.y)))]
+        if bad or not (rep.created or rep.rebuilt or rep.seeds_used):
+            raise EditError("the parcel couldn't be built. %s To save the lines without a parcel, untick "
+                            "Build parcel after saving." % (bad[0].message if bad else ""))

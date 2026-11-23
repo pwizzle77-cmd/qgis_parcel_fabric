@@ -59,9 +59,14 @@ def to_crs(geom, src_crs, dst_crs):
     return g
 
 
+def is_mercator(crs):
+    """Mercator / Web Mercator stretches distances (about 15% in north Florida)."""
+    return crs.projectionAcronym() in ("merc", "webmerc")
+
+
 def unit_word(crs):
-    """'feet' or 'meters' for a projected CRS, None for geographic ones."""
-    if crs.isGeographic():
+    """'feet' or 'meters' for a projected CRS, None for ones that can't measure land."""
+    if crs.isGeographic() or is_mercator(crs):
         return None
     u = crs.mapUnits()
     feet = {Qgis.DistanceUnit.Feet, Qgis.DistanceUnit.FeetUSSurvey}

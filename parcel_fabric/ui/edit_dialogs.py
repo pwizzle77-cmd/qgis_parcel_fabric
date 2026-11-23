@@ -180,7 +180,9 @@ class SplitWindow(_EditWindow):
         row.addWidget(self.cut_lbl, 1)
         self.lay.addLayout(row)
         tip = QLabel("The line snaps to fabric points. Where it crosses a boundary line, that line "
-                     "is split in two (the old one is retired). Points along it become corners.")
+                     "is split in two (the old one is retired). Points along it become corners.\n\n"
+                     "To split by a deed's calls, enter or paste them in Traverse, select the parent "
+                     "parcel, and press Split Selected Parcel there.")
         tip.setWordWrap(True)
         tip.setStyleSheet("color: palette(mid);")
         self.lay.addWidget(tip)

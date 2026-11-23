@@ -67,7 +67,9 @@ class RecordsDock(QDockWidget):
         for row in [
             [("New Record...", self._new_record, "Create a record for a plat, deed or survey"),
              ("Edit...", self._edit_record, "Correct the record's name, type, book, page, document..."),
-             ("Set Active", self._activate, "New lines and parcels will belong to this record")],
+             ("Set Active", self._activate, "New lines and parcels will belong to this record"),
+             ("Remove Mistake...", self._clear_record,
+              "Delete every line, point and parcel this record created (the record itself stays)")],
             [("Zoom To", self._zoom, "Zoom to the record's parcels"),
              ("Document", self._open_doc, "Open the record's scanned document"),
              ("Closure Report...", self._closure_report, "Every course, misclose and area for the record's parcels"),
@@ -242,6 +244,44 @@ class RecordsDock(QDockWidget):
         _dates(fab, [gid])          # a changed recorded date moves the history
         self._fill()
         self._update_active()
+
+    def _clear_record(self):
+        from ..core.clear import apply_clear, plan_clear
+        fab = self.manager.active
+        gid = self._selected_gid()
+        rec = fab.record_by_id(gid) if fab and gid else None
+        if rec is None:
+            QMessageBox.information(self, "Remove Mistake", "Select the record in the list first.")
+            return
+        try:
+            plan = plan_clear(fab, gid)
+            gone, back = plan.counts(plan.delete), plan.counts(plan.restore)
+            if not gone and not back:
+                QMessageBox.information(self, "Remove Mistake", "That record has nothing to clear." + (
+                    " %d shared feature(s) stay." % plan.kept if plan.kept else ""))
+                return
+            text = "Permanently delete from record '%s':\n%s.\n" % (rec["Name"] or gid, gone or "nothing")
+            if back:
+                text += "\nBrought back (this record had retired them):\n%s.\n" % back
+            if plan.kept:
+                text += "\n%d line(s)/point(s) stay because other parcels use them.\n" % plan.kept
+            text += "\nThe record itself stays. This can't be undone. Continue?"
+            if QMessageBox.question(
+                    self, "Remove Mistake", text,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            apply_clear(fab, plan)
+        except Exception as e:
+            msg = str(e)
+            if "retired features are history" in msg:
+                msg += "\n\nThe Multi-user database rules (Fabric Settings) don't allow deleting."
+            QMessageBox.critical(self, "Remove Mistake", msg)
+            return
+        self.iface.mapCanvas().refreshAllLayers()
+        self._fill()
+        self.iface.messageBar().pushSuccess("Parcel Fabric", "Cleared record '%s': %s removed." % (
+            rec["Name"] or gid, gone or "nothing"))
 
     def _open_doc(self):
         fab = self.manager.active

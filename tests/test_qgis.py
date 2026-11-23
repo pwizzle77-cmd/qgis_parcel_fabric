@@ -43,7 +43,7 @@ class _Base(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "fabric.gpkg")
         S.create_fabric("ogr", self.path, "", "", ["Tax", "Lot"], "EPSG:2238",
-                        {"name": "Test Fabric"})
+                        {"name": "Test Fabric", "plss_use_default": "0"})   # no network in tests
         self.fab = Fabric.open("ogr", self.path)
         self.fab.add_to_project()
         self.rec = self.fab.create_record("PB 1 PG 1", "Plat")
@@ -157,6 +157,69 @@ class FabricTests(_Base):
         PN.number_splits(self.fab, "12-4S-16-00001-000", kids)
         self.assertEqual(sorted(f["ParcelNumber"] for f in kids),
                          ["12-4S-16-00001-001", "12-4S-16-00001-002"])
+
+    def _plss_gpkg(self, path, layers):
+        """layers: {name: (fields {name: value}, extra)} each one big square over the test area."""
+        from osgeo import ogr, osr
+        ds = ogr.GetDriverByName("GPKG").CreateDataSource(path)
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(2238)
+        for name, vals in layers.items():
+            ly = ds.CreateLayer(name, srs, ogr.wkbPolygon)
+            for k in vals:
+                ly.CreateField(ogr.FieldDefn(k, ogr.OFTString))
+            f = ogr.Feature(ly.GetLayerDefn())
+            for k, v in vals.items():
+                f.SetField(k, v)
+            f.SetGeometry(ogr.CreateGeometryFromWkt(
+                "POLYGON((%f %f,%f %f,%f %f,%f %f,%f %f))" % (X0 - 1000, Y0 - 1000, X0 + 5000, Y0 - 1000,
+                                                           X0 + 5000, Y0 + 5000, X0 - 1000, Y0 + 5000,
+                                                           X0 - 1000, Y0 - 1000)))
+            ly.CreateFeature(f)
+        ds = None
+
+    def test_parcel_numbers_from_split_plss_layers(self):
+        path = os.path.join(self.tmp, "split.gpkg")
+        self._plss_gpkg(path, {"secs": {"FRSTDIVNO": "9"},
+                               "twps": {"TWNSHPNO": "003", "TWNSHPDIR": "S", "RANGENO": "017"}})
+        self.fab.save_settings({"plss_provider": "ogr", "plss_source": path + "|layername=secs",
+                                "plss_section_field": "FRSTDIVNO",
+                                "plss_twp_provider": "ogr", "plss_twp_source": path + "|layername=twps",
+                                "plss_twp_township_field": "TWNSHPNO", "plss_twp_dir_field": "TWNSHPDIR",
+                                "plss_twp_range_field": "RANGENO"})
+        sq = ("N 0 E", 100), ("N 90 E", 100), ("S 0 E", 100), ("S 90 W", 100)
+        self.traverse("Tax", courses(*sq))
+        rep = build_parcels(self.fab, "Tax", self.rec)
+        self.assertEqual(rep.created, 1, rep.issues)
+        self.assertEqual([f["ParcelNumber"] for f in self.fab.parcels.getFeatures()], ["09-3S-17-00001-000"])
+
+    def test_default_plss_is_rest_and_added_to_group(self):
+        from parcel_fabric.core import parcel_numbers as PN
+        self.fab.save_settings({"plss_use_default": "1"})
+        sec, twp = PN.plss_layers(self.fab.settings)
+        self.assertEqual(sec[1], "arcgisfeatureserver")
+        self.assertIn("BLM_Natl_PLSS_CadNSDI/MapServer/2", sec[0])
+        self.assertIn("BLM_Natl_PLSS_CadNSDI/MapServer/1", twp[0])
+        # a configured single layer still wins
+        self.fab.save_settings({"plss_source": "x.gpkg", "plss_provider": "ogr"})
+        sec, twp = PN.plss_layers(self.fab.settings)
+        self.assertEqual((sec[0], twp), ("x.gpkg", None))
+        # off and nothing chosen -> not set up
+        self.fab.save_settings({"plss_source": "", "plss_use_default": "0"})
+        self.assertEqual(PN.plss_layers(self.fab.settings), (None, None))
+
+    @unittest.skipUnless(os.environ.get("QPF_LIVE"), "set QPF_LIVE=1 to call the BLM service")
+    def test_live_blm_lookup(self):
+        from parcel_fabric.core import parcel_numbers as PN
+        from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY
+        self.fab.save_settings({"plss_use_default": "1"})
+        grp = QgsProject.instance().layerTreeRoot().findGroup(self.fab.name)
+        self.assertEqual(sorted(n.name() for n in grp.findLayers() if n.layer().customProperty("qpf/plss")),
+                         ["PLSS Sections (BLM)", "PLSS Townships (BLM)"])
+        look = PN.PlssLookup(self.fab)
+        xf = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:4326"),
+                                    self.fab.parcels.crs(), QgsProject.instance())
+        self.assertEqual(look.at(xf.transform(QgsPointXY(-82.64, 30.19))), (32, 3, "S", 17))
 
     def test_old_integer_parcel_id_is_migrated(self):
         from osgeo import ogr
@@ -294,6 +357,33 @@ class Phase2Tests(_Base):
         down = L.walk(self.fab, self.parent["GlobalID"], up=False)
         self.assertEqual(F.descendants(down, roots), set(allp))
         self.assertEqual(H.undated_records(self.fab), [])
+
+    def test_copy_parallel_into_the_same_layer(self):
+        from parcel_fabric.core import edits as E
+        E.copy_parallel(self.fab, [next(self.fab.lines.getFeatures())], 10, "left", "Tax", self.rec2)
+        self.assertEqual(self.fab.lines.featureCount(), 5)
+
+    def test_lineage_is_not_hidden(self):
+        from parcel_fabric.core import lineage as L
+        L.add(self.fab, self.rec2, "Split", [self.parent], [self.parent])
+        self.fab.set_show_only_current(True)
+        self.assertEqual(len(list(self.fab.lineage.getFeatures())), 1)
+        self.fab.lineage.setSubsetString(CURRENT)          # as saved in older projects
+        self.assertEqual(len(list(self.fab.lineage.getFeatures())), 0)
+        fab = Fabric.from_project()[0]
+        self.assertEqual(len(list(fab.lineage.getFeatures())), 1)
+
+    def test_split_can_be_cleared(self):
+        from qgis.core import QgsGeometry, QgsPointXY
+        from parcel_fabric.core import edits as E
+        from parcel_fabric.core.clear import apply_clear, plan_clear
+        cut = QgsGeometry.fromPolylineXY([QgsPointXY(X0 + 80, Y0 - 20), QgsPointXY(X0 + 80, Y0 + 120)])
+        E.cut_parcel(self.fab, self.parent, [cut], self.rec2)
+        apply_clear(self.fab, plan_clear(self.fab, self.rec2))
+        self.assertEqual([f["GlobalID"] for f in self.current()], [self.parent["GlobalID"]])
+        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 4)
+        self.assertEqual(sum(1 for _ in self.fab.points.getFeatures()), 4)
+        self.assertEqual(len(list(self.fab.lineage.getFeatures())), 0)
 
     def test_copy_parallel(self):
         from parcel_fabric.core import edits as E
@@ -481,3 +571,31 @@ class Release08Tests(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+USER_LEGAL = '''A parcel of land lying in Section 1, Township 1 South, Range 1 East, Example County, Florida, being more particularly described as follows:
+
+Beginning at the most northwesterly corner of the herein described parcel; thence N 88°07'47" E, a distance of 888.56 feet; thence S 1°41'12" E, a distance of 2,248.45 feet; thence S 89°32'04" W, a distance of 626.73 feet; thence S 0°17'39" W, a distance of 352.96 feet; thence S 87°32'46" W, a distance of 249.79 feet; thence N 1°41'12" W, a distance of 2,588.34 feet to the Point of Beginning.
+
+Containing 47.741 acres (2,079,589 square feet), more or less.'''
+
+
+class UserLegalTests(_Base):
+    def test_reported_legal_description_draws_and_closes(self):
+        from parcel_fabric.core.legal_import import parse
+        rows, cs, problems = parse(USER_LEGAL, self.fab.foot_m)
+        self.assertFalse(problems)
+        self.assertEqual([round(c.distance, 2) for c in cs],
+                         [888.56, 2248.45, 626.73, 352.96, 249.79, 2588.34])
+        res = C.compute((X0, Y0), cs)
+        self.assertLess(res.misclose, 0.05)
+        self.assertAlmostEqual(res.area / 43560.0, 47.741, delta=0.001)
+        self.fab.add_traverse("Tax", res.legs, self.rec)
+        lines = list(self.fab.lines.getFeatures())
+        self.assertEqual(len(lines), 6)
+        rep = build_parcels(self.fab, "Tax", self.rec)
+        self.assertEqual(rep.created, 1, rep.issues)
+        p = next(self.fab.parcels.getFeatures())
+        self.assertAlmostEqual(p.geometry().area() / 43560.0, 47.741, delta=0.001)
+        self.assertTrue(p.geometry().isGeosValid())
+        self.assertLess(p["MiscloseDistance"], 0.05)

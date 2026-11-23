@@ -12,6 +12,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..core import schema as S
+from ..core.geomio import unit_word
 
 SETTINGS_KEY = "ParcelFabric/last_gpkg"
 
@@ -162,6 +163,11 @@ class NewFabricDialog(QDialog):
             provider, source, schema = self.storage.value()
         except ValueError as e:
             QMessageBox.warning(self, "New Parcel Fabric", str(e))
+            return
+        if unit_word(self.crs.crs()) is None:
+            QMessageBox.warning(self, "New Parcel Fabric", "Pick a State Plane (or other survey) coordinate system "
+                                "in feet or meters, such as EPSG:2238. Web Mercator and latitude/longitude "
+                                "distort distances and bearings.")
             return
         types = [t.strip() for t in self.types.text().split(",") if t.strip()]
         bad = [t for t in types if not t.replace("_", "").isalnum()]

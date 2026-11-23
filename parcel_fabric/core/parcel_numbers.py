@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Give parcels numbers like 12-4S-16-02942-000.
 
-Section, township and range come from a PLSS sections layer chosen in
+Section, township and range come from PLSS layer(s) (default: BLM National PLSS REST), set in
 Fabric Settings.  New parcels take the next unused ParcelID in their
 section-township-range; splits take the next -001, -002... under a parent.
 Retired parcels count as "used", so a number is never handed out twice.
@@ -15,11 +15,12 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
-    QgsSpatialIndex,
+    QgsRectangle,
     QgsVectorLayer,
 )
 
 from . import numbering as N
+from . import schema as S
 from .fabric import CURRENT
 
 
@@ -61,36 +62,105 @@ def used_numbers(fabric):
     return out
 
 
+def plss_layers(settings):
+    """The PLSS layers the settings point at: (sections spec, townships spec or None).
+
+    Each spec is (uri, provider, name).  A chosen sections layer wins (an optional
+    township layer joins it); otherwise the BLM REST default is used.
+    """
+    if settings.get("plss_source"):
+        sec = (settings["plss_source"], settings.get("plss_provider") or "ogr", "PLSS")
+        twp = None
+        if settings.get("plss_twp_source"):
+            twp = (settings["plss_twp_source"], settings.get("plss_twp_provider") or "ogr", "PLSS townships")
+        return sec, twp
+    if settings.get("plss_use_default", "1") == "1":
+        d = S.PLSS_DEFAULT
+        return ((S.rest_uri(d["sections"]["url"]), "arcgisfeatureserver", d["sections"]["name"]),
+                (S.rest_uri(d["townships"]["url"]), "arcgisfeatureserver", d["townships"]["name"]))
+    return None, None
+
+
+class _PointLayer:
+    """Point-in-polygon lookups on a layer, fetching only features near the point.
+
+    Works for huge online layers (no full download); found polygons are cached.
+    """
+
+    def __init__(self, spec, crs, label):
+        uri, prov, _name = spec
+        self.layer = QgsVectorLayer(uri, label, prov)
+        if not self.layer.isValid():
+            raise NumberingNotSetUp("The PLSS %s layer can't be opened:\n%s" % (label, uri))
+        self.xf = QgsCoordinateTransform(crs, self.layer.crs(), QgsProject.instance())
+        self.cache = []
+
+    def at(self, pt):
+        g = QgsGeometry.fromPointXY(self.xf.transform(pt))
+        for geom, f in self.cache:
+            if geom.contains(g):
+                return f
+        d = 1e-6 if self.layer.crs().isGeographic() else 0.5
+        p = g.asPoint()
+        req = QgsFeatureRequest().setFilterRect(QgsRectangle(p.x() - d, p.y() - d, p.x() + d, p.y() + d))
+        for f in self.layer.getFeatures(req):
+            if f.geometry().contains(g):
+                self.cache.append((f.geometry(), f))
+                return f
+        if self.layer.dataProvider() and self.layer.dataProvider().hasErrors():
+            raise NumberingNotSetUp("The PLSS service didn't answer (%s). Check the connection or "
+                                    "choose a local PLSS layer in Fabric Settings." %
+                                    "; ".join(self.layer.dataProvider().errors()[:1]))
+        return None
+
+
 class PlssLookup:
-    """Point -> (section, township number, N/S, range) from the PLSS layer."""
+    """Point -> (section, township number, N/S, range).
+
+    Sections come from the sections layer.  Township/range/direction come from the
+    township layer when there is one (the usual split PLSS layout), else from fields
+    on the sections layer (a single combined layer).
+    """
 
     def __init__(self, fabric):
         s = fabric.settings
-        src, prov = s.get("plss_source"), s.get("plss_provider")
-        self.fsec = s.get("plss_section_field")
-        self.ftwp = s.get("plss_township_field")
-        self.ftdir = s.get("plss_township_dir_field") or None
-        self.frng = s.get("plss_range_field")
-        if not (src and prov and self.fsec and self.ftwp and self.frng):
-            raise NumberingNotSetUp("Choose the PLSS sections layer and its fields in "
+        sec, twp = plss_layers(s)
+        if sec is None:
+            raise NumberingNotSetUp("Choose the PLSS layer(s) in Fabric Settings > Parcel numbers.")
+        crs = fabric.parcels.crs()
+        if s.get("plss_source"):
+            self.fsec = s.get("plss_section_field")
+            self.ftwp, self.ftdir, self.frng = (s.get("plss_township_field"),
+                                                s.get("plss_township_dir_field") or None,
+                                                s.get("plss_range_field"))
+            if twp:
+                self.ttwp, self.tdir, self.trng = (s.get("plss_twp_township_field"),
+                                                   s.get("plss_twp_dir_field") or None,
+                                                   s.get("plss_twp_range_field"))
+        else:
+            d = S.PLSS_DEFAULT
+            self.fsec = d["sections"]["section"]
+            self.ttwp, self.tdir, self.trng = (d["townships"][k] for k in ("township", "dir", "range"))
+        if not self.fsec or (twp and not (self.ttwp and self.trng)) or \
+                (not twp and not (self.ftwp and self.frng)):
+            raise NumberingNotSetUp("Choose the PLSS section, township and range fields in "
                                     "Fabric Settings > Parcel numbers.")
-        self.layer = QgsVectorLayer(src, "PLSS", prov)
-        if not self.layer.isValid():
-            raise NumberingNotSetUp("The PLSS sections layer can't be opened:\n%s" % src)
-        self.xf = QgsCoordinateTransform(fabric.parcels.crs(), self.layer.crs(), QgsProject.instance())
-        self.index = QgsSpatialIndex(self.layer.getFeatures())
+        self.sections = _PointLayer(sec, crs, "sections")
+        self.townships = _PointLayer(twp, crs, "townships") if twp else None
 
     def at(self, pt: QgsPointXY):
-        p = self.xf.transform(pt)
-        g = QgsGeometry.fromPointXY(p)
-        for fid in self.index.intersects(g.boundingBox()):
-            f = self.layer.getFeature(fid)
-            if f.geometry().contains(g):
-                sec = N.normalize_section(f[self.fsec])
-                twp, tdir = N.normalize_township(f[self.ftwp], f[self.ftdir] if self.ftdir else None)
-                rng = N.normalize_range(f[self.frng])
-                return sec, twp, tdir, rng
-        return None
+        f = self.sections.at(pt)
+        if f is None:
+            return None
+        sec = N.normalize_section(f[self.fsec])
+        if self.townships is None:
+            twp, tdir = N.normalize_township(f[self.ftwp], f[self.ftdir] if self.ftdir else None)
+            return sec, twp, tdir, N.normalize_range(f[self.frng])
+        t = self.townships.at(pt)
+        if t is None:
+            return None
+        twp, tdir = N.normalize_township(t[self.ttwp], t[self.tdir] if self.tdir else None)
+        return sec, twp, tdir, N.normalize_range(t[self.trng])
 
 
 def number_new(fabric, features, used=None, plss=None, overwrite=False):

@@ -229,7 +229,8 @@ class LegalWriterDialog(QDialog):
         unit = unit_word(crs)
         if unit is None:
             QMessageBox.warning(self, self.windowTitle(), "Pick a projected coordinate system in feet or "
-                                "meters under 'Measure in' (e.g. your State Plane zone).")
+                                "meters under 'Measure in' (e.g. your State Plane zone). Web Mercator can't "
+                                "be used: it distorts distances and bearings.")
             return
         geom = to_crs(self.feature.geometry(), self.layer.crs(), crs)
         parts = polygon_rings(geom)

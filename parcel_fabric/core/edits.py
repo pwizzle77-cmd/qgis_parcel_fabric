@@ -112,9 +112,10 @@ def _arc_geom(s, m, e):
 
 def _copy_attrs(src, lyr):
     f = QgsFeature(lyr.fields())
-    for name in lyr.fields().names():
-        if name in src.fields().names():
-            f.setAttribute(name, src[name])
+    keys = lyr.primaryKeyAttributes()      # a copied fid collides with the original when saved
+    for i, name in enumerate(lyr.fields().names()):
+        if i not in keys and name in src.fields().names():
+            f.setAttribute(i, src[name])
     return f
 
 
@@ -132,6 +133,13 @@ def _require_record(record):
         raise EditError("Set an active record first - edits belong to the record that makes them.")
 
 
+def _require_current(fabric, parent):
+    if parent["RetiredByRecord"] or not still_current(fabric.parcels, parent.id()):
+        raise EditError("That parcel is already retired (another editor may have just retired it).")
+    if parent["ParcelType"] not in fabric.parcel_types:
+        raise EditError("The parcel has no known parcel type.")
+
+
 def _set(f, values):
     for k, v in values.items():
         if f.fields().indexOf(k) >= 0:
@@ -147,7 +155,6 @@ def split_line_features(fabric, line_feat, xy, record):
     Record dimensions are prorated; direction keeps the record basis.
     Returns (feature_a, feature_b) or None when xy is at an end.
     """
-    lyr = line_feat.fields()
     curve = _single_curve(line_feat.geometry())
     kind, data, flattened = _parts(curve)
     rec_dir = _num(line_feat["Direction"])
@@ -179,9 +186,7 @@ def split_line_features(fabric, line_feat, xy, record):
     offset = (math.radians(rec_dir) - whole_az) if rec_dir is not None else 0.0
     out = []
     for part, plen in parts:
-        f = QgsFeature(lyr)
-        for name in lyr.names():
-            f.setAttribute(name, line_feat[name])
+        f = _copy_attrs(line_feat, fabric.lines)
         if kind == "arc":
             f.setGeometry(_arc_geom(*part))
             caz = G.chord_azimuth(part[0], part[2])
@@ -213,10 +218,11 @@ def node_lines(fabric, ptype, xy, record, ed, res):
         if f["RetiredByRecord"]:          # retired earlier in this same edit
             continue
         g = f.geometry()
-        if _seg(g).distance(pt) > tol:
-            continue
         curve = _single_curve(g)
         if curve is None:
+            continue
+        # a point exactly on a true arc is off its segmented copy, and the other way round
+        if min(_seg(g).distance(pt), math.sqrt(curve.closestSegment(QgsPoint(*xy))[0])) > tol:
             continue
         s, e = _xy(curve.startPoint()), _xy(curve.endPoint())
         if math.hypot(s[0] - xy[0], s[1] - xy[1]) <= tol or math.hypot(e[0] - xy[0], e[1] - xy[1]) <= tol:
@@ -300,47 +306,61 @@ def cut_parcel(fabric, parent, cut_geoms, record, operation="Split", remainder_k
     (QgsGeometry point) picks a different piece to keep.
     """
     _require_record(record)
-    if parent["RetiredByRecord"] or not still_current(fabric.parcels, parent.id()):
-        raise EditError("That parcel is already retired (another editor may have just retired it).")
+    _require_current(fabric, parent)
     ptype = parent["ParcelType"]
-    if ptype not in fabric.parcel_types:
-        raise EditError("The parcel has no known parcel type.")
-    res = EditResult()
     pgeom = parent.geometry()
     cuts = clip_cuts(fabric, pgeom, cut_geoms)
     pieces = _pieces(pgeom, cuts)
     if len(pieces) < 2:
         raise EditError("The cut doesn't divide the parcel into separate pieces.")
+    keep = None
+    if remainder_keeps:
+        keep = next((g for g in pieces if remainder_point is not None and g.contains(remainder_point)),
+                    None) or max(pieces, key=lambda g: g.area())
+    new_lines = [_new_line(fabric, fabric.lines, [a, b], ptype, record, dim_source)    # one line per course
+                 for pts in cuts for a, b in zip(pts, pts[1:])
+                 if math.hypot(b[0] - a[0], b[1] - a[1]) > fabric.tolerance]
+    nodes = [xy for pts in cuts for xy in (pts[0], pts[-1])]
+    return replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep)
 
+
+def replace_parcel(fabric, parent, nodes, new_lines, record, operation, keep=None, finish_lines=None):
+    """Add ``new_lines`` inside ``parent`` and build the pieces, as one edit.
+
+    Boundary lines are split at ``nodes``.  ``keep`` (a piece's geometry) stays the
+    parent; without it the parent is retired.  ``finish_lines(ed)`` may adjust lines
+    before the parcels are built.
+    """
+    res = EditResult()
+    ptype = parent["ParcelType"]
     lines = fabric.lines
-    with EditSession([lines, fabric.points, fabric.parcels], operation) as ed:
-        for pts in cuts:
-            for xy in (pts[0], pts[-1]):
-                node_lines(fabric, ptype, xy, record, ed, res)
-            for a, b in zip(pts, pts[1:]):           # one fabric line per course
-                if math.hypot(b[0] - a[0], b[1] - a[1]) > fabric.tolerance:
-                    ed.add(lines, _new_line(fabric, lines, [a, b], ptype, record, dim_source))
-                    res.lines_added += 1
-        if not remainder_keeps:
+    # if anything fails, the retired parent and split lines come back too (parcels are saved first)
+    with EditSession([fabric.parcels, lines, fabric.points, fabric.records, fabric.lineage], operation) as ed:
+        for xy in nodes:
+            node_lines(fabric, ptype, xy, record, ed, res)
+        for nf in new_lines:
+            ed.add(lines, nf)
+        res.lines_added = len(new_lines)
+        if finish_lines is not None:
+            finish_lines(ed)
+        adopt = None
+        if keep is None:
             ed.change(fabric.parcels, parent.id(), "RetiredByRecord", record)
             res.parents_retired = 1
-
-    adopt = None
-    if remainder_keeps:
-        big = next((g for g in pieces if remainder_point is not None and g.contains(remainder_point)),
-                   None) or max(pieces, key=lambda g: g.area())
-        adopt = {parent.id(): big.pointOnSurface()}
-    within = _seg(pgeom).buffer(fabric.tolerance, 4)
-    rep = build_parcels(fabric, ptype, record, new_record=record, number=False, adopt=adopt,
-                        within=within)
-    res.issues = [i for i in rep.issues if i.severity != "info"]
-    kids = _by_gid(fabric, rep.new_ids)
-    if not kids:
-        raise EditError("The new lines were added but no parcels were built - run Check Fabric. "
-                        + "; ".join(i.message for i in rep.issues))
-    _number_children(fabric, parent, kids, res)
-    parent = fabric.parcels.getFeature(parent.id()) if remainder_keeps else parent
-    L.add(fabric, record, operation, [parent], _by_gid(fabric, rep.new_ids))
+        else:
+            adopt = {parent.id(): keep.pointOnSurface()}
+        within = _seg(parent.geometry()).buffer(fabric.tolerance, 4)
+        rep = build_parcels(fabric, ptype, record, new_record=record, number=False, adopt=adopt,
+                            within=within)
+        res.issues = [i for i in rep.issues if i.severity != "info"]
+        kids = _by_gid(fabric, rep.new_ids)
+        if not kids or any(i.severity == "error" for i in rep.issues):
+            raise EditError("Nothing was saved, because the pieces couldn't be built. "
+                            + "; ".join(i.message for i in rep.issues))
+        _number_children(fabric, parent, kids, res)
+        if keep is not None:
+            parent = fabric.parcels.getFeature(parent.id())
+        L.add(fabric, record, operation, [parent], _by_gid(fabric, rep.new_ids))
     _dates(fabric, [record])
     return res
 

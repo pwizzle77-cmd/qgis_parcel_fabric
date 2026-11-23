@@ -37,6 +37,7 @@ class DeedReaderDialog(QDialog):
         self.manager = manager
         self.fabric = manager.active
         self.courses = []
+        self.tie = []
         self.rows = []           # dicts: phase, source, course, by, note
         self._task = None
         self.setWindowTitle("Read Deed (AI)")
@@ -350,7 +351,7 @@ class DeedReaderDialog(QDialog):
             else:
                 call, color = "context (not a call)", GREY
             if row["phase"] != "Boundary" and row["course"] is not None:
-                call, color = "tie (excluded): " + call, GREY
+                call, color = "tie to the POB: " + call, GREY
             items = [row["phase"], row["source"], call, row["by"]]
             for c, txt in enumerate(items):
                 it = QTableWidgetItem(txt)
@@ -363,6 +364,9 @@ class DeedReaderDialog(QDialog):
         boundary = [r for r in self.rows if r["phase"] == "Boundary"]
         courses = [r["course"] for r in boundary if r["course"] is not None]
         self.courses = courses if not bad else []
+        ties = [r for r in self.rows if r["phase"] == "Commencement"]
+        self.tie = [r["course"] for r in ties if r["course"] is not None] if not any(
+            r["course"] is None and r["note"] for r in ties) else []
         if courses:
             res = C.compute((0.0, 0.0), courses)
             ratio = "closes exactly" if res.misclose < 1e-6 else "misclose %.3f ft (1:%s)" % (

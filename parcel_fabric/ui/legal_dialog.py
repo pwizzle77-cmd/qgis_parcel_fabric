@@ -13,8 +13,9 @@ from qgis.PyQt.QtWidgets import (
 )
 from qgis.PyQt.QtCore import Qt
 
+from ..core import cogo as C
 from ..core import units as U
-from ..core.legal_import import parse
+from ..core.legal_import import parse, tie_courses
 
 
 class LegalDialog(QDialog):
@@ -24,6 +25,7 @@ class LegalDialog(QDialog):
         self.resize(820, 600)
         self.foot_m = fabric_foot_m
         self.courses = []
+        self.tie = []               # calls from the point of commencement to the POB
         lay = QVBoxLayout(self)
 
         split = QSplitter(Qt.Orientation.Vertical)
@@ -84,7 +86,7 @@ class LegalDialog(QDialog):
 
     def _invalidate(self):
         self._ok = False
-        self.courses = []
+        self.courses, self.tie = [], []
         self.reviewed.setChecked(False)
         self._sync()
 
@@ -107,10 +109,12 @@ class LegalDialog(QDialog):
             self.table.insertRow(r)
             if row.issue:
                 result, color = row.issue, QColor("#b3261e")
+            elif getattr(row, "closing", None) is not None:
+                result, color = "computed closing course: " + _describe(row.closing), QColor("#b26a00")
             elif row.course is None:
                 result, color = "context (not a course)", QColor("#666666")
             elif row.phase != "Boundary":
-                result, color = "excluded tie: %s" % _describe_wb(row.course), QColor("#666666")
+                result, color = "tie to the POB: %s" % _describe_wb(row.course), QColor("#666666")
             else:
                 c = courses[ci] if ci < len(courses) else None
                 ci += 1
@@ -129,9 +133,13 @@ class LegalDialog(QDialog):
             self.status.setText("No boundary courses found.")
             return
         self.courses = courses
+        self.tie = tie_courses(rows, self.foot_m, self.feet.currentData())
         self._ok = True
-        self.status.setText("%d boundary course(s) ready. Review them, tick the box, then load."
-                            % len(courses))
+        res = C.compute((0.0, 0.0), courses, close_to=(0.0, 0.0))
+        close = "closes exactly" if res.misclose < 0.005 else "MISCLOSE %.2f ft (1:%s) - check the calls" % (
+            res.misclose, "{:,}".format(int(res.ratio)))
+        self.status.setText("%d boundary course(s) ready; %s. Review them, tick the box, then load."
+                            % (len(courses), close))
         self._sync()
 
 

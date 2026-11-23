@@ -10,10 +10,10 @@ from .wb_engine import Course, angle, bearing, traverse
 
 NUMBER = r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?'
 UNIT = r"(?:us\s+survey\s+feet|international\s+feet|feet|foot|ft\.?|meters?|metres?|m\b|')"
-QUADRANT = re.compile(r'''\b(north|south|n|s)\s*(\d[\w\s.°:'"′″-]{0,100}?)\s*(?<![a-z])(east|west|e|w)\b''', re.I)
+QUADRANT = re.compile(r'''\b(north|south|n|s)(?![a-z])\.?\s*(\d[\w\s.°:'"′″-]{0,100}?)\s*(?<![a-z])(east|west|e|w)\b\.?''', re.I)
 CARDINAL = re.compile(r'\b(?:due\s+)?(north|south|east|west|n|s|e|w)\b', re.I)
 POB = re.compile(r'\b(?:true\s+)?point\s+of\s+beginning\b|\b(?:T\.?\s*)?P\.?\s*O\.?\s*B\b\.?', re.I)
-SPLIT = re.compile(r';|\bthence\b|\b(?=containing\s+[\d.,]+\s+acres?\b)|\n(?=\s*(?:\d+[.)]\s*)?(?:north|south|east|west|[NSEW])(?:\b|(?=\d)))|(?<=[.!?])\s+(?=(?:north|south|east|west)\b|[NS]\s*\d)', re.I)
+SPLIT = re.compile(r';|\bthence\b|\b(?=containing\s+[\d.,]+\s+acres?\b)|\n(?=\s*(?:\d+[.)]\s*)?(?:north|south|east|west|[NSEW])(?:\b|(?=\d)))|(?<=[.!?])\s+(?=(?:north|south|east|west)\b|[NS]\.?\s*\d)', re.I)
 
 
 @dataclass
@@ -116,11 +116,13 @@ def _call(source, phase, forced):
         if re.search(r'\b(?:except(?:ing)?|less\s+and\s+except|spiral|compound\s+curve|reverse\s+curve)\b', text, re.I) or re.search(rf'{NUMBER}\s*(?:chains?|rods?|links?|varas?|yards?)\b', text, re.I):
             raise ValueError('Exception, approximate call, unsupported unit or complex curve; enter this description manually.')
         context = re.match(r'\s*(?:a\s+parcel|situat\w*)\b', text, re.I)
-        anchor = re.match(r'\s*(?:beginning\s+at|commenc\w*)\b', text, re.I)
+        anchor = re.match(r'\s*(?:begin(?:ning)?\b|commenc\w*\b)', text, re.I) or re.fullmatch(r'(?:run|proceed|go)', text, re.I)
         heading = re.fullmatch(r'(?:proceed\s+)?(?:through\s+)?(?:the\s+)?following\s+courses\s*:', text, re.I)
         annotation = re.match(r'\s*(?:all\s+distances\b|containing\s+[\d.,]+\s+acres?\b)', text, re.I)
         if ((not forced and context) or anchor or heading or annotation) and not re.search(rf'{NUMBER}\s*{UNIT}\b', text, re.I) and not QUADRANT.search(text):
             return result
+        # "150.00 feet, more or less" is boilerplate: the stated record distance is the call
+        text = re.sub(rf'({NUMBER}\s*(?:{UNIT})?)\s*,?\s*(?:\+/-|±|\(?\bmore\s+or\s+less\b\)?)', r'\1', text, flags=re.I)
         if re.search(r'\bmore\s+or\s+less\b', text, re.I):
             raise ValueError('Approximate call; resolve the record distance manually.')
         directions = _directions(text)

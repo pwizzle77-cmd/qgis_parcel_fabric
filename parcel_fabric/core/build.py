@@ -25,7 +25,9 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsGeometry,
     QgsPointXY,
+    QgsPolygon,
     QgsRectangle,
+    QgsVertexId,
 )
 
 from . import schema as S
@@ -94,14 +96,19 @@ def _components(curve):
 
 def _ring_from(lines, chain):
     cc = QgsCompoundCurve()
+    pieces = []
     for fid, rev in chain:
         parts = _components(lines[fid]["curve"])
         if rev:
             parts = [p.reversed() for p in reversed(parts)]
         else:
             parts = [p.clone() for p in parts]
-        for p in parts:
-            cc.addCurve(p)
+        pieces += parts
+    # lines meet within the tolerance, not always exactly; a ring has to be exact to be saved
+    for prev, p in zip([pieces[-1]] + pieces, pieces):
+        p.moveVertex(QgsVertexId(0, 0, 0), prev.endPoint())
+    for p in pieces:
+        cc.addCurve(p)
     if not cc.isClosed():
         try:
             cc.close()
@@ -146,6 +153,8 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
         rep.issues.append(Issue("info", "No current %s lines in this %s to build from."
                                 % (ptype, "record" if record_gid else "map view")))
         return rep
+    if within is not None:
+        bbox = _union_rect(bbox, within.boundingBox())      # the outline may be far from the new lines
     bbox.grow(max(tol * 10, bbox.width() * 0.05, bbox.height() * 0.05))
 
     # ---- candidate lines (neighbours can close a loop) ---------------------
@@ -166,6 +175,7 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
         return rep
 
     # ---- faces --------------------------------------------------------------
+    _snap_ends(lines, tol)
     noded = QgsGeometry.unaryUnion([d["seg"] for d in lines.values()])
     faces = QgsGeometry.polygonize([noded])
     if faces.isNull():
@@ -190,7 +200,7 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
                 mid = d["seg"].interpolate(d["len"] / 2.0).asPoint()
                 if _on(ring, (mid.x(), mid.y()), tol):
                     bnd.append(fid)
-        if not any(fid in scope_ids for fid in bnd):
+        if within is None and not any(fid in scope_ids for fid in bnd):
             continue                       # loop not touched by this build
         pos = face.pointOnSurface().asPoint()
         if within is not None and not within.contains(QgsGeometry.fromPointXY(pos)):
@@ -218,6 +228,8 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
                                     pos.x(), pos.y()))
         else:
             dx, dy, per, carea = ms
+            whole = QgsGeometry(QgsPolygon(fpoly.exteriorRing().clone())).area()
+            carea *= face.area() / whole      # holes aren't part of the parcel
             mdist = math.hypot(dx, dy)
             mratio = (per / mdist) if mdist > 1e-9 else None
             if mratio is not None and mratio < fabric.warn_ratio:
@@ -226,10 +238,12 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
         vals = {"MiscloseDistance": mdist, "MiscloseRatio": mratio, "CalculatedArea": carea}
 
         # ---- match an existing parcel or seed --------------------------------
-        target, kind = _match(parcel_lyr, face, pos, tol, current)
-        if kind == "overlap" and target.id() in adopt and face.contains(adopt[target.id()]):
-            kind = "same"
-            adopt.pop(target.id())         # only one loop takes the parent's place
+        taken = next((fid for fid, pt in adopt.items() if face.contains(pt)), None)
+        if taken is not None:
+            adopt.pop(taken)               # only one loop takes the parent's place
+            target, kind = parcel_lyr.getFeature(taken), "same"
+        else:
+            target, kind = _match(parcel_lyr, face, pos, tol, current)
         if target is not None and kind in ("seed", "same"):
             vals["IsSeed"] = 0
             if not target["CreatedByRecord"] and record_gid:
@@ -329,6 +343,35 @@ def update_record_footprint(fabric, record_gid, ed):
         u.convertToMultiType()
         ed.set_geometry(fabric.records, rec.id(), u)
     ed.change(fabric.records, rec.id(), "ParcelCount", count)
+
+
+def _snap_ends(lines, tol):
+    """Make line ends that are within ``tol`` of each other share one coordinate.
+
+    Real legal descriptions misclose by a few thousandths of a foot; polygonize
+    needs exactly coincident vertices, so without this a nearly-closed loop
+    produces no parcel at all.
+    """
+    reps = []
+
+    def rep_for(xy):
+        for r in reps:
+            if abs(r[0] - xy[0]) <= tol and abs(r[1] - xy[1]) <= tol:
+                return r
+        reps.append(xy)
+        return xy
+
+    for d in lines.values():
+        ls = d["seg"].constGet().clone()
+        n = ls.numPoints()
+        if n < 2:
+            continue
+        for i, key in ((0, "start"), (n - 1, "end")):
+            x, y = rep_for((ls.xAt(i), ls.yAt(i)))
+            if (x, y) != (ls.xAt(i), ls.yAt(i)):
+                ls.setXAt(i, x)
+                ls.setYAt(i, y)
+        d["seg"] = QgsGeometry(ls)
 
 
 def _on(ring_geom, xy, tol):

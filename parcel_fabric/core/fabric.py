@@ -28,10 +28,12 @@ from qgis.core import (
 
 from . import schema as S
 from . import units as U
+from .geomio import is_mercator
 from .cogo import Course, CURVE, LINE, DIR_CHORD, DIR_RADIAL, DIR_TANGENT, DIR_TANGENT_PREV
 
 PROP_FABRIC = "qpf/fabric_id"
 PROP_ROLE = "qpf/role"
+PROP_PLSS = "qpf/plss"
 ACTIVE_RECORD_VAR = "qpf_active_record"
 CURRENT = '"RetiredByRecord" IS NULL'
 CONNECTIONS = "Connections"
@@ -122,6 +124,9 @@ class Fabric:
         for fid, layers in found.items():
             if not need <= set(layers):
                 continue
+            lin = layers.get(S.ROLE_LINEAGE)
+            if lin is not None and lin.subsetString() == CURRENT and not lin.isEditable():
+                lin.setSubsetString("")     # projects saved before 0.8.8 hid every lineage row
             settings = S.read_settings(layers[S.ROLE_SETTINGS])
             for k, v in S.DEFAULT_SETTINGS.items():
                 settings.setdefault(k, v)
@@ -192,6 +197,9 @@ class Fabric:
         if not crs.isValid() or crs.isGeographic() or crs.mapUnits() == Qgis.DistanceUnit.Unknown:
             raise ValueError("Traverse needs a projected fabric coordinate system with linear units, "
                              "such as State Plane. Courses are entered in feet.")
+        if is_mercator(crs):
+            raise ValueError("This fabric is in %s (Web Mercator), which stretches and turns every course. "
+                             "Make a new fabric in your State Plane zone, such as EPSG:2238." % crs.authid())
         return self.foot_m / QgsUnitTypes.fromUnitToUnitFactor(crs.mapUnits(), Qgis.DistanceUnit.Meters)
 
     def traverse_map_legs(self, legs):
@@ -245,6 +253,7 @@ class Fabric:
         S.write_settings(self.layers[S.ROLE_SETTINGS], values)
         self.settings.update({k: str(v) for k, v in values.items()})
         self._configure_layers()
+        self.ensure_plss_layers()
 
     # ------------------------------------------------------------------
     # Adding to the project
@@ -269,7 +278,31 @@ class Fabric:
         if rec_node:
             rec_node.setItemVisibilityChecked(False)
         self.set_show_only_current(True)
+        self.ensure_plss_layers(project)
         return group
+
+    def ensure_plss_layers(self, project=None):
+        """Show the default REST PLSS layers in this fabric's group (or drop them if a
+        custom PLSS layer is configured).  Needs the group made by add_to_project."""
+        project = project or QgsProject.instance()
+        group = project.layerTreeRoot().findGroup(self.name)
+        if group is None:
+            return
+        mine = [n for n in group.findLayers() if n.layer() and n.layer().customProperty(PROP_PLSS)]
+        if self.settings.get("plss_source") or self.settings.get("plss_use_default", "1") != "1":
+            for n in mine:
+                project.removeMapLayer(n.layerId())
+            return
+        if mine:
+            return
+        # townships first so sections draw on top; unchecked because national layers draw slowly
+        for spec in (S.PLSS_DEFAULT["townships"], S.PLSS_DEFAULT["sections"]):
+            lyr = QgsVectorLayer(S.rest_uri(spec["url"]), spec["name"], "arcgisfeatureserver")
+            if not lyr.isValid():
+                continue        # offline: numbering reports it; try again next time
+            lyr.setCustomProperty(PROP_PLSS, "1")
+            project.addMapLayer(lyr, False)
+            group.addLayer(lyr).setItemVisibilityChecked(False)
 
     def _configure_layers(self):
         """Default values and form widgets (dropdowns) for every layer."""
@@ -322,7 +355,8 @@ class Fabric:
                 continue
             if lyr.isEditable():
                 continue  # QGIS can't change the filter while editing
-            lyr.setSubsetString(CURRENT if on else "")
+            has_retired = lyr.fields().indexOf("RetiredByRecord") >= 0      # lineage has none
+            lyr.setSubsetString(CURRENT if on and has_retired else "")
 
     # ------------------------------------------------------------------
     # Records
@@ -580,7 +614,9 @@ class EditSession:
             lx.endEditCommand()
         errors = []
         for lx in self._started:
-            if not lx.commitChanges():
+            if errors:
+                lx.rollBack()           # one layer failed: don't save the rest without it
+            elif not lx.commitChanges():
                 errors.append("%s: %s" % (lx.name(), "; ".join(lx.commitErrors())))
                 lx.rollBack()
         if errors:

@@ -153,6 +153,20 @@ ROLE_RECORDS, ROLE_POINTS, ROLE_CONNECTIONS, ROLE_SETTINGS = (
 ROLE_LINES, ROLE_PARCELS = "lines", "parcels"
 ROLE_LINEAGE = "lineage"
 
+# BLM National PLSS CadNSDI (verified 2026-11): layer 1 = townships (TWNSHPNO, TWNSHPDIR,
+# RANGENO, RANGEDIR), layer 2 = sections (FRSTDIVNO).  Both Web Mercator; both carry PLSSID.
+PLSS_DEFAULT_URL = "https://gis.blm.gov/arcgis/rest/services/Cadastral/BLM_Natl_PLSS_CadNSDI/MapServer"
+PLSS_DEFAULT = {
+    "sections": {"url": PLSS_DEFAULT_URL + "/2", "name": "PLSS Sections (BLM)", "section": "FRSTDIVNO"},
+    "townships": {"url": PLSS_DEFAULT_URL + "/1", "name": "PLSS Townships (BLM)",
+                  "township": "TWNSHPNO", "dir": "TWNSHPDIR", "range": "RANGENO"},
+}
+
+
+def rest_uri(url):
+    return "crs='EPSG:3857' url='%s'" % url
+
+
 DEFAULT_SETTINGS = {
     "version": "2",
     "foot": "us_survey",          # or "international"
@@ -171,6 +185,14 @@ DEFAULT_SETTINGS = {
     "plss_township_field": "",
     "plss_township_dir_field": "",
     "plss_range_field": "",
+    # optional separate township/range layer (online PLSS is split into layers)
+    "plss_twp_provider": "",
+    "plss_twp_source": "",
+    "plss_twp_township_field": "",
+    "plss_twp_dir_field": "",
+    "plss_twp_range_field": "",
+    # "1": when no layer above is chosen, use the BLM National PLSS REST service
+    "plss_use_default": "1",
     "number_on_build": "1",
     "number_types": "",           # JSON list; blank = every parcel type
 }

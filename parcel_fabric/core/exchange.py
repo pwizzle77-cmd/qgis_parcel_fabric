@@ -83,7 +83,16 @@ def _geom_for(target, g, xf):
     return g
 
 
-def _copy(src, target, xf, extra=None, feedback=None, label=""):
+def _tell(progress, pct, text=None):
+    if progress is None:
+        return
+    try:
+        progress(pct, text)
+    except TypeError:
+        progress(pct)
+
+
+def _copy(src, target, xf, extra=None, feedback=None, label="", progress=None):
     pk = set(target.dataProvider().pkAttributeIndexes())
     names = [n for i, n in enumerate(target.fields().names()) if i not in pk and n.lower() not in ("fid", "objectid")]
     src_names = src.fields().names()
@@ -93,8 +102,17 @@ def _copy(src, target, xf, extra=None, feedback=None, label=""):
             if alt in src_names:
                 lookup[n] = alt
                 break
-    batch, n_ok, n_skip = [], 0, 0
+    batch, n_ok, n_skip, seen = [], 0, 0, 0
+    total = src.featureCount()
+    name = label or src.name()
     for f in src.getFeatures():
+        seen += 1
+        if seen % 200 == 0:
+            if total and total > 0:
+                _tell(progress, min(99.0, 100.0 * seen / float(total)),
+                      "Importing %s: %d of %d" % (name, seen, total))
+            else:
+                _tell(progress, 0, "Importing %s: %d" % (name, seen))
         g = _geom_for(target, f.geometry(), xf) if f.hasGeometry() else None
         if f.hasGeometry() and g is None:
             n_skip += 1
@@ -120,7 +138,7 @@ def _copy(src, target, xf, extra=None, feedback=None, label=""):
     return n_ok, n_skip
 
 
-def import_pro(fabric, path, tables, feedback=None):
+def import_pro(fabric, path, tables, feedback=None, progress=None):
     """Copy a Pro fabric's tables into this fabric. ``tables`` as detect_fabric gives.
     Field names already match, so values come across as they are. Returns a
     list of messages."""
@@ -137,23 +155,31 @@ def import_pro(fabric, path, tables, feedback=None):
             return None
         return QgsCoordinateTransform(src.crs(), fabric.parcels.crs(), QgsProject.instance())
 
+    jobs = []
     for role, target in (("records", fabric.records), ("points", fabric.points),
                          ("connections", fabric.connections)):
         name = tables.get(role)
-        if not name:
-            continue
-        src = open_src(name)
-        ok, skip = _copy(src, target, xf_for(src), feedback=feedback, label=name)
-        msgs.append("%s: %d copied%s" % (name, ok, ", %d multi-part skipped" % skip if skip else ""))
+        if name:
+            jobs.append((name, target, None))
     types = list(fabric.parcel_types)
     for ptype, (poly, lines) in tables.get("types", {}).items():
         if ptype not in types:
             types.append(ptype)
-        for name, target in ((poly, fabric.parcels), (lines, fabric.lines)):
-            src = open_src(name)
-            ok, skip = _copy(src, target, xf_for(src), {"ParcelType": ptype}, feedback, name)
+        jobs.append((poly, fabric.parcels, ptype))
+        jobs.append((lines, fabric.lines, ptype))
+    count = max(len(jobs), 1)
+    for index, (name, target, ptype) in enumerate(jobs):
+        def tick(pct, text=None, index=index, name=name):
+            _tell(progress, (index + (pct or 0) / 100.0) * 100.0 / count, text or ("Importing %s" % name))
+
+        src = open_src(name)
+        extra = {"ParcelType": ptype} if ptype else None
+        ok, skip = _copy(src, target, xf_for(src), extra, feedback, name, tick)
+        if ptype:
             msgs.append("%s -> %s (%s): %d copied%s" % (name, target.name(), ptype, ok,
                                                         ", %d multi-part skipped" % skip if skip else ""))
+        else:
+            msgs.append("%s: %d copied%s" % (name, ok, ", %d multi-part skipped" % skip if skip else ""))
     if types != fabric.parcel_types:
         import json
         fabric.save_settings({"parcel_types": json.dumps(types)})
@@ -193,7 +219,7 @@ def _seg_key(seg, nd=3):
     return (seg[0],) + ends
 
 
-def import_landxml(fabric, path, ptype, record):
+def import_landxml(fabric, path, ptype, record, progress=None):
     """Lines (shared edges once), points and parcels from a LandXML file,
     built under ``record``. Coordinates are taken as the fabric's CRS."""
     parcels = landxml.read(path)
@@ -201,7 +227,10 @@ def import_landxml(fabric, path, ptype, record):
         raise RuntimeError("No parcels with geometry in that LandXML file.")
     seen, feats, pts, ptxy = set(), [], [], []
     tol = fabric.tolerance
-    for _name, segs, _attrs in parcels:
+    total = max(len(parcels), 1)
+    for n, (_name, segs, _attrs) in enumerate(parcels):
+        if n % 10 == 0:
+            _tell(progress, 80.0 * n / total, "Importing LandXML: parcel %d of %d" % (n + 1, total))
         for seg in segs:
             k = _seg_key(seg)
             if k in seen:
@@ -214,11 +243,13 @@ def import_landxml(fabric, path, ptype, record):
                 ptxy.append(xy)
                 if fabric.find_point(*xy) is None:
                     pts.append(fabric.new_point_feature(xy[0], xy[1], record))
+    _tell(progress, 85, "Saving LandXML lines and points")
     with EditSession([fabric.lines, fabric.points], "Import LandXML") as ed:
         for f in feats:
             ed.add(fabric.lines, f)
         for p in pts:
             ed.add(fabric.points, p)
+    _tell(progress, 92, "Building parcels from LandXML")
     rep = build_parcels(fabric, ptype, record)
     # carry LandXML names onto the parcels that were built
     named = 0
@@ -545,7 +576,7 @@ def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
 
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
                         split_history=True, parent_suffix=0, separator=None, digits=None,
-                        book="", page=""):
+                        book="", page="", progress=None):
     """Copy polygons from ``source`` in as current parcels.
 
     With no ``record``, each parcel id is filed as its own record (name and
@@ -650,7 +681,17 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             made.append(gid)
         return blank_gid
 
+    total = source.featureCount()
+    seen = 0
+    _tell(progress, 0, "Importing parcels")
     for feat in source.getFeatures():
+        seen += 1
+        if seen % 50 == 0 or (total and seen == total):
+            if total and total > 0:
+                _tell(progress, min(90.0, 90.0 * seen / float(total)),
+                      "Importing parcels: %d of %d" % (seen, total))
+            else:
+                _tell(progress, 0, "Importing parcels: %d" % seen)
         raw = feat.geometry()
         if raw is None or raw.isEmpty():
             skipped["empty"] += 1
@@ -721,6 +762,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     target.reload()
     linked = retired = 0
     if split_history and stems:
+        _tell(progress, 92, "Linking split history")
         linked, retired = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems,
                                        separator, digits)
         target.reload()
@@ -734,6 +776,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         _stamp_footprints(fabric, record_ids)
         date_ids = record_ids
     if date_ids:
+        _tell(progress, 96, "Refreshing parcel history")
         try:
             from .history import refresh_dates
             refresh_dates(fabric, date_ids)
@@ -741,6 +784,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             from qgis.core import Qgis, QgsMessageLog
             QgsMessageLog.logMessage("History dates not refreshed: %s" % e, "Parcel Fabric",
                                      Qgis.MessageLevel.Warning)
+    _tell(progress, 100, "Import finished")
     return {"copied": copied, "skipped": skipped, "backup": backup, "multipart_note": convert_error,
             "records": len(record_ids), "record_ids": record_ids,
             "history_linked": linked, "history_retired": retired}
@@ -757,7 +801,7 @@ def _cut(text, limit):
     return (text or "")[:limit]
 
 
-def _copy_outlines(target, source, row_for):
+def _copy_outlines(target, source, row_for, progress=None, label="features"):
     """Copy polygon features onto ``target``. ``row_for`` returns the attributes.
 
     An outline already on the target is skipped. A database that stores one
@@ -796,7 +840,17 @@ def _copy_outlines(target, source, row_for):
         held[next_id] = geom
         index.addFeature(marker)
 
+    total = source.featureCount()
+    seen = 0
+    _tell(progress, 0, "Importing %s" % label)
     for feat in source.getFeatures():
+        seen += 1
+        if seen % 50 == 0 or (total and seen == total):
+            if total and total > 0:
+                _tell(progress, min(99.0, 100.0 * seen / float(total)),
+                      "Importing %s: %d of %d" % (label, seen, total))
+            else:
+                _tell(progress, 0, "Importing %s: %d" % (label, seen))
         raw = feat.geometry()
         if raw is None or raw.isEmpty():
             skipped["empty"] += 1
@@ -834,7 +888,7 @@ def _copy_outlines(target, source, row_for):
 
 
 def import_lots(fabric, source, lot_field=None, subdivision_field=None, block_field=None,
-                parcel_field=None):
+                parcel_field=None, progress=None):
     """Copy a county lot layer into Lots. Tax parcels stay in Parcels.
 
     shortcut: a lot drawn with Subdivide Block stays in Parcels. This table is
@@ -846,17 +900,17 @@ def import_lots(fabric, source, lot_field=None, subdivision_field=None, block_fi
                 "Block": _cut(_attr_text(feat, block_field), 16),
                 "Subdivision": _cut(_attr_text(feat, subdivision_field), 80),
                 "ParcelNumber": _cut(_attr_text(feat, parcel_field), 30)}
-    return _copy_outlines(fabric.lots, source, row)
+    return _copy_outlines(fabric.lots, source, row, progress, "lots")
 
 
-def import_subdivisions(fabric, source, name_field=None):
+def import_subdivisions(fabric, source, name_field=None, progress=None):
     """Copy subdivision polygons into Subdivisions."""
     def row(feat):
         return {"GlobalID": S.new_guid(), "Name": _cut(_attr_text(feat, name_field), 255)}
-    return _copy_outlines(fabric.subdivisions, source, row)
+    return _copy_outlines(fabric.subdivisions, source, row, progress, "subdivisions")
 
 
-def import_blocks(fabric, source, block_field=None, subdivision_field=None):
+def import_blocks(fabric, source, block_field=None, subdivision_field=None, progress=None):
     """Copy subdivision block polygons into Blocks. Tax parcels stay in Parcels.
 
     shortcut: a lot drawn with Subdivide Block stays in Parcels. This table is
@@ -866,7 +920,7 @@ def import_blocks(fabric, source, block_field=None, subdivision_field=None):
         return {"GlobalID": S.new_guid(),
                 "Block": _cut(_attr_text(feat, block_field), 16),
                 "Subdivision": _cut(_attr_text(feat, subdivision_field), 80)}
-    return _copy_outlines(fabric.blocks, source, row)
+    return _copy_outlines(fabric.blocks, source, row, progress, "blocks")
 
 
 # --------------------------------------------------------------------------

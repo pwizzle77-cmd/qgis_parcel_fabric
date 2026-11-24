@@ -8,7 +8,8 @@ from qgis.gui import QgsFieldComboBox, QgsMapLayerComboBox
 from qgis.PyQt.QtCore import QDate, Qt
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QTabWidget,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
+    QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -89,6 +90,16 @@ class ExchangeDialog(QDialog):
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(120)
         lay.addWidget(self.log)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setVisible(False)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setFormat("%p%")
+        self.bar.setVisible(False)
+        lay.addWidget(self.status)
+        lay.addWidget(self.bar)
+        self._importing = False
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(self.close)
         lay.addWidget(bb)
@@ -101,6 +112,20 @@ class ExchangeDialog(QDialog):
         self.log.appendPlainText(text)
         from qgis.PyQt.QtWidgets import QApplication
         QApplication.processEvents()
+
+    def _progress(self, pct, text=None):
+        self.bar.setVisible(True)
+        self.status.setVisible(True)
+        self.bar.setValue(max(0, min(100, int(pct))))
+        if text:
+            self.status.setText(text)
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.processEvents()
+
+    def _end_progress(self):
+        self.bar.setVisible(False)
+        self.status.setVisible(False)
+        self._importing = False
 
     def _record(self):
         rid = self.manager.active_record_id
@@ -276,11 +301,15 @@ class ExchangeDialog(QDialog):
         self._bind_fields(layer)
 
     def _import_layer(self):
+        if self._importing:
+            return
         if self.fab is None:
             QMessageBox.warning(self, self.windowTitle(), "Open a fabric first.")
             return
+        self._importing = True
         src = self._file_layer if self._file_layer is not None else self.src_layer.currentLayer()
         if src is None:
+            self._end_progress()
             QMessageBox.warning(self, self.windowTitle(), "Choose a polygon layer.")
             return
         kind = self.target.currentText()
@@ -289,20 +318,22 @@ class ExchangeDialog(QDialog):
                 result = X.import_lots(self.fab, src, self.lot_field.currentField(),
                                        self.lot_sub_field.currentField(),
                                        self.lot_block_field.currentField(),
-                                       self.lot_parcel_field.currentField())
+                                       self.lot_parcel_field.currentField(), self._progress)
                 label = "lots"
             elif kind == "Blocks":
                 result = X.import_blocks(self.fab, src, self.block_field.currentField(),
-                                         self.block_sub_field.currentField())
+                                         self.block_sub_field.currentField(), self._progress)
                 label = "blocks"
             elif kind == "Subdivisions":
-                result = X.import_subdivisions(self.fab, src, self.sub_name_field.currentField())
+                result = X.import_subdivisions(self.fab, src, self.sub_name_field.currentField(),
+                                               self._progress)
                 label = "subdivisions"
             else:
                 rid = None
                 if self.use_active.isChecked():
                     rid = self.manager.active_record_id
                     if not rid:
+                        self._end_progress()
                         QMessageBox.warning(self, self.windowTitle(),
                                             "Set an active record first, or leave that box off.")
                         return
@@ -310,6 +341,7 @@ class ExchangeDialog(QDialog):
                     sep, digits, parent = clean_pattern(
                         self.num_sep.text(), self.num_digits.value(), self.num_parent.text())
                 except NumberError as e:
+                    self._end_progress()
                     QMessageBox.warning(self, self.windowTitle(), str(e))
                     return
                 S.write_settings(self.fab.layers[S.ROLE_SETTINGS], {
@@ -324,11 +356,14 @@ class ExchangeDialog(QDialog):
                     self.fab, src, self.layer_type.currentText(), rid,
                     self.num_field.currentField() or None,
                     self.date_field.currentField() or None,
-                    self.history.isChecked(), parent, sep, digits, book, page)
+                    self.history.isChecked(), parent, sep, digits, book, page,
+                    progress=self._progress)
                 label = "parcels"
         except Exception as e:
+            self._end_progress()
             QMessageBox.critical(self, self.windowTitle(), "Import failed: %s" % e)
             return
+        self._end_progress()
         ids = result.get("record_ids") or []
         if kind == "Parcels" and not self.use_active.isChecked() and len(ids) == 1:
             self.manager.set_active_record(ids[0])
@@ -400,20 +435,24 @@ class ExchangeDialog(QDialog):
             t["records"] or "-", t["points"] or "-", t["connections"] or "-"))
 
     def _import_pro(self):
-        if self.fab is None or not self.pro_tables:
+        if self._importing or self.fab is None or not self.pro_tables:
             return
-        # use the (possibly edited) parcel type names from the table
-        types = {}
-        for i in range(self.pro_tbl.rowCount()):
-            name = self.pro_tbl.item(i, 0).text().strip()
-            types[name] = (self.pro_tbl.item(i, 1).text(), self.pro_tbl.item(i, 2).text())
-        tables = dict(self.pro_tables, types=types)
+        self._importing = True
         try:
-            for m in X.import_pro(self.fab, self.pro_path.text(), tables, feedback=self._say):
+            # use the (possibly edited) parcel type names from the table
+            types = {}
+            for i in range(self.pro_tbl.rowCount()):
+                name = self.pro_tbl.item(i, 0).text().strip()
+                types[name] = (self.pro_tbl.item(i, 1).text(), self.pro_tbl.item(i, 2).text())
+            tables = dict(self.pro_tables, types=types)
+            for m in X.import_pro(self.fab, self.pro_path.text(), tables, feedback=self._say,
+                                  progress=self._progress):
                 self._say(m)
         except Exception as e:
             QMessageBox.critical(self, self.windowTitle(), "Import failed: %s" % e)
             return
+        finally:
+            self._end_progress()
         self.manager.refresh()
         self.iface.mapCanvas().refresh()
         self._say("Done. Run Check Fabric to review.")
@@ -448,15 +487,20 @@ class ExchangeDialog(QDialog):
             edit.setText(path)
 
     def _import_xml(self):
+        if self._importing:
+            return
         rid = self._record()
         if self.fab is None or not rid or not os.path.exists(self.xml_path.text()):
             return
+        self._importing = True
         try:
             nl, npt, rep, named = X.import_landxml(self.fab, self.xml_path.text(),
-                                                   self.xml_type.currentText(), rid)
+                                                   self.xml_type.currentText(), rid, self._progress)
         except Exception as e:
+            self._end_progress()
             QMessageBox.critical(self, self.windowTitle(), "Import failed: %s" % e)
             return
+        self._end_progress()
         self._say("LandXML: %d lines, %d points, %d parcels built (%d named)%s" % (
             nl, npt, rep.created, named, "; %d issue(s) - run Check Fabric" % len(rep.issues) if rep.issues else ""))
         self.iface.mapCanvas().refresh()

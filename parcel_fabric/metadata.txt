@@ -3,7 +3,7 @@ name=Parcel Fabric
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=A records-driven parcel fabric for QGIS: enter plats and deeds as COGO traverses, build parcels and lots with true curves, and track every parcel to the record that created it.
-version=0.10.2
+version=0.10.3
 author=Charles
 email=pwizzle77@gmail.com
 about=Parcel Fabric brings the ArcGIS Pro parcel fabric workflow to QGIS. Every line, point and parcel belongs to the legal record (plat, deed, survey) that created it. Enter courses by hand or paste a metes-and-bounds description, check closure, write COGO-attributed lines with true circular arcs, then Build turns closed loops into parcel polygons and corner points with misclose and area computed from the record dimensions. Check Fabric finds open loops, missing COGO and poor closures. Works in a GeoPackage or any database QGIS connects to (PostgreSQL/PostGIS, SQL Server, Oracle). Field names match the ArcGIS Pro parcel fabric so data moves between them. Pure Python, no external dependencies. Independent of Esri.
@@ -11,6 +11,7 @@ tracker=https://github.com/pwizzle77-cmd/qgis_parcel_fabric/issues
 repository=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 homepage=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 changelog=
+    0.10.3 - Check Fabric opens at once and names each check while it runs. Import / Export shows a progress bar and which layer or parcel it is on.
     0.10.2 - Type a roll parcel ID, export the tax-roll shapefile and a change list, check gaps and overlaps, keep the daily tools on the toolbar, store subdivision lot width and depth, stack a condo or common area on one polygon, and show how far a legal description sits from the boundary. Labels add lot size and acreage over 1 acre. Import a polygon layer as current parcels, one record per parcel id (optional book, page, and date), with split history from -001, -002. Lots, subdivision blocks, and subdivisions import into their own tables. Fabric Settings > Parcel numbers sets the split separator, digit count, and parent suffix. Multi-polygon parcels keep true curves
     0.10.1 - Adjoining parcels can be traversed all the way round: courses along existing lines reuse them, a neighbour's line is split at a new corner, and corners within the fit distance are held to existing ones
     0.10.0 - One parcel number can have several polygons: Merge joins parcels that don't touch, Separate undoes it, a deed split's whole remainder keeps its number, closure reports and legal descriptions cover every polygon. Existing GeoPackage fabrics: Fabric Settings > Allow multi-polygon parcels (saves a copy first). Merge saves completely or not at all

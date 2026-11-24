@@ -22,11 +22,39 @@ CHECKS = [
 ]
 
 
-def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=None):
+def tell(progress, pct, text=None):
+    """Report a percent and the check that is running. A one-argument callback still works."""
+    if progress is None:
+        return
+    try:
+        progress(pct, text)
+    except TypeError:
+        progress(pct)
+
+
+def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=None, progress=None):
     checks = set(checks or [c[0] for c in CHECKS])
     ptypes = ptypes or fabric.parcel_types
     issues = []
     tol = fabric.tolerance
+    line_layers = [(t, fabric.lines, type_expr(t)) for t in ptypes] + \
+        [("Connections", fabric.connections, None)]
+    phases = 1 + len(line_layers) + len(ptypes)
+    if "gaps" in checks:
+        phases += 1
+    if "record_dates" in checks:
+        phases += 1
+    phase = {"n": 0}
+
+    def begin(text):
+        if feedback is not None:
+            feedback(text)
+        tell(progress, min(99.0, 100.0 * phase["n"] / max(phases, 1)), text)
+        phase["n"] += 1
+
+    def sub(text, frac=0.0):
+        base = max(phase["n"] - 1, 0)
+        tell(progress, min(99.0, 100.0 * (base + frac) / max(phases, 1)), text)
 
     def req(extra=None):
         r = QgsFeatureRequest().setFilterExpression(CURRENT + (" AND " + extra if extra else ""))
@@ -37,6 +65,7 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
     # every current fabric point, bucketed on a grid, so "has a point?" is fast
     cell = max(tol, 1e-9)
     point_keys = set()
+    begin("Checking parcel types" if "no_type" in checks else "Reading the fabric")
     if "no_point" in checks:
         for p in fabric.points.getFeatures(req()):
             g = p.geometry()
@@ -60,13 +89,13 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                                         % (lyr.name(), f["ParcelType"] or None),
                                         p.x() if p else None, p.y() if p else None, lyr.id(), f.id()))
 
-    line_layers = [(t, fabric.lines, type_expr(t)) for t in ptypes] + \
-        [("Connections", fabric.connections, None)]
     for t, lyr, texpr in line_layers:
-        if feedback:
-            feedback("Checking %s lines" % t)
+        begin("Checking %s lines" % t)
         ends = []
-        for f in lyr.getFeatures(req(texpr)):
+        total = lyr.featureCount()
+        for n, f in enumerate(lyr.getFeatures(req(texpr))):
+            if total and total > 0 and n and n % 200 == 0:
+                sub("Checking %s lines: %d of %d" % (t, n, total), min(0.99, n / float(total)))
             curve = _single_curve(f.geometry())
             if curve is None or curve.isEmpty():
                 issues.append(Issue("error", "Empty or multi-part line", layer_id=lyr.id(), fid=f.id()))
@@ -79,10 +108,12 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
             if "no_record" in checks and not f["CreatedByRecord"]:
                 issues.append(Issue("info", "%s line has no record" % t, s[0], s[1], lyr.id(), f.id()))
         if "dangles" in checks and t != "Connections":
+            sub("Checking open loops on %s" % t)
             for fid, (x, y) in dangles(ends, tol):
                 issues.append(Issue("error", "Dangling %s line end (loop not closed)" % t,
                                     x, y, lyr.id(), fid))
         if "no_point" in checks:
+            sub("Checking %s line ends for points" % t)
             done = set()
             for fid, (x, y) in ends:
                 key = (round(x / cell), round(y / cell))
@@ -98,9 +129,11 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
     gap_items = []
     stack_i = lyr.fields().indexOf("QPF_Stack")
     for t in ptypes:
-        if feedback:
-            feedback("Checking %s parcels" % t)
-        for f in lyr.getFeatures(req(type_expr(t))):
+        begin("Checking %s parcels" % t)
+        total = lyr.featureCount()
+        for n, f in enumerate(lyr.getFeatures(req(type_expr(t)))):
+            if total and total > 0 and n and n % 200 == 0:
+                sub("Checking %s parcels: %d of %d" % (t, n, total), min(0.99, n / float(total)))
             g = f.geometry()
             if g.isNull():
                 continue
@@ -142,9 +175,15 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                 else:
                     seen_numbers[num] = f.id()
     if gap_items:
-        for sev, msg, x, y in neighbor_issues(gap_items, tol):
+        begin("Checking overlaps and gaps")
+
+        def gap_pulse(frac):
+            sub("Checking overlaps and gaps", frac)
+
+        for sev, msg, x, y in neighbor_issues(gap_items, tol, gap_pulse):
             issues.append(Issue(sev, msg, x, y, lyr.id(), None))
     if "record_dates" in checks:
+        begin("Checking record dates")
         from .history import undated_records
         for gid in undated_records(fabric):
             rec = fabric.record_by_id(gid)
@@ -152,10 +191,11 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
             issues.append(Issue("warning", "Record %s has no recorded date - Parcel History can't "
                                 "place its parcels in time" % name,
                                 layer_id=fabric.records.id(), fid=rec.id() if rec is not None else None))
+    tell(progress, 100, "Finished")
     return issues
 
 
-def neighbor_issues(items, tol):
+def neighbor_issues(items, tol, progress=None):
     """Overlaps and sliver gaps between current parcels of the same type.
 
     ``items`` are (name, parcel type, stack flag, QgsGeometry). A stacked unit
@@ -182,7 +222,10 @@ def neighbor_issues(items, tol):
         index.addFeature(feat)
         geoms.append((name, ptype, str(stack or "").strip(), geom))
     out = []
+    total = max(len(geoms), 1)
     for i, (name, ptype, stack, geom) in enumerate(geoms):
+        if progress is not None and i % 25 == 0:
+            progress(i / total)
         box = geom.boundingBox()
         box.grow(near)
         for j in index.intersects(box):

@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.10.2, experimental.** Test it on a copy of real data before
+**Status: 0.10.3, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.2.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.3.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. The toolbar shows Records, Traverse, Build, Assign Parcel
    Numbers and Check Fabric, plus the active record. **More** holds the rest. The same
@@ -93,7 +93,7 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    the separator, how many trailing digits count as the split, and the parent suffix.
    The same three boxes are on Import / Export > Parcel layer. Defaults are `-`, 3 digits,
    and parent `000`, so `12345-002` and a Florida strap keep working.
-7. **Check Fabric** – open loops, lines without COGO, line ends without points,
+7. **Check Fabric** – the window opens immediately and names the check that is running. It looks for open loops, lines without COGO, line ends without points,
    poor misclose, stated vs calculated area over 1%, unbuilt seeds, features with
    no record, overlaps, and gaps wider than the snap tolerance but still a sliver
    (a road-width opening is left alone). A condo or common-area unit that sits on
@@ -287,6 +287,8 @@ plugin installed with its centerline and address layers chosen; otherwise the wi
 says so.
 
 **Import / Export...**
+
+The window stays open. A progress bar names the layer and how many features have been copied.
 
 - **Parcel layer** – a shapefile, GeoPackage, or polygon layer already on the map, for an
   office that was not keeping a fabric. Choose what to import:

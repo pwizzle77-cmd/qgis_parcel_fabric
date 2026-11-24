@@ -313,23 +313,32 @@ class ParcelFabricPlugin:
 
     def check_fabric(self):
         fab = self._need_fabric()
-        if fab is None:
+        if fab is None or getattr(self, "_checking", False):
             return
         from .core.qa import run_checks
         from .ui.issues_dialog import IssuesDialog
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        dlg = IssuesDialog(self.iface, "Check Fabric - %s" % fab.name,
+                           "Checking the fabric…", [], fab.records.crs())
+        self._checking = True
+        dlg._running = True
         try:
-            issues = run_checks(fab)
+            dlg.show()
+            dlg.set_progress(0, "Starting Check Fabric…")
+            issues = run_checks(fab, progress=dlg.set_progress)
         except Exception as e:
-            QApplication.restoreOverrideCursor()
+            dlg._running = False
+            dlg.close()
             QMessageBox.critical(self.iface.mainWindow(), "Check Fabric", str(e))
             return
-        QApplication.restoreOverrideCursor()
+        finally:
+            dlg._running = False
+            self._checking = False
         if not issues:
-            self.iface.messageBar().pushSuccess("Parcel Fabric", "Check Fabric found no problems.")
+            dlg.show_issues([], "No problems found.")
             return
         errs = sum(1 for i in issues if i.severity == "error")
         warns = sum(1 for i in issues if i.severity == "warning")
-        IssuesDialog(self.iface, "Check Fabric - %s" % fab.name,
-                     "%d problem(s), %d warning(s), %d note(s)." % (errs, warns, len(issues) - errs - warns),
-                     issues, fab.records.crs()).show()
+        dlg.show_issues(issues, "%d problem(s), %d warning(s), %d note(s)."
+                        % (errs, warns, len(issues) - errs - warns))
+        dlg.raise_()
+        dlg.activateWindow()

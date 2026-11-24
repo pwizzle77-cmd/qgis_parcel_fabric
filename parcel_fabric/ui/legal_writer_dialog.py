@@ -18,7 +18,7 @@ from qgis.PyQt.QtWidgets import (
 from ..core import cogo as C
 from ..core import legal_writer as W
 from ..core import units as U
-from ..core.geomio import polygon_rings, to_crs, unit_word
+from ..core.geomio import fit_gap, parts_of, polygon_rings, to_crs, unit_word
 from ..core.legal_import import parse
 
 HEADER_KEY = "ParcelFabric/legal_header"
@@ -251,12 +251,15 @@ class LegalWriterDialog(QDialog):
         if "{str}" in header:
             header = header.replace("{str}", self._str_text(self.feature.geometry()))
         texts, checks = [], []
+        part_geoms = parts_of(geom)
         for k, (ext, holes) in enumerate(parts, 1):
-            text, area = W.write(self._prepare(ext, cw, start), unit, self.sec_dec.value(), self.dist_dec.value(),
+            prepared = self._prepare(ext, cw, start)
+            text, area = W.write(prepared, unit, self.sec_dec.value(), self.dist_dec.value(),
                                  "" if len(parts) > 1 else header, commence,
                                  [self._prepare(h, cw) for h in holes])
             poly_area = abs(W.signed_area(ext)) - sum(abs(W.signed_area(h)) for h in holes)
-            good, msg = self._self_check(text, area, poly_area, unit)
+            part = part_geoms[k - 1] if k - 1 < len(part_geoms) else geom
+            good, msg = self._self_check(text, area, poly_area, unit, part, prepared)
             if len(parts) > 1:
                 text, msg = "TRACT %d\n\n%s" % (k, text), "Tract %d: %s" % (k, msg)
             texts.append(text)
@@ -266,25 +269,61 @@ class LegalWriterDialog(QDialog):
         self.out.setPlainText("\n\n".join(texts))
         self.check.setText("<br>".join(checks))
 
-    def _self_check(self, text, area, poly_area, unit):
-        """Read the description back and close it, so typos can't slip in. Returns (good, message)."""
+    def _scale_sentence(self):
+        fab = self.manager.active
+        feat = self.feature
+        if fab is None or feat is None or feat.fields().indexOf("CreatedByRecord") < 0:
+            return ""
+        rec = fab.record_by_id(feat["CreatedByRecord"])
+        if rec is None or rec.fields().indexOf("QPF_ScaleFactor") < 0:
+            return ""
+        try:
+            scale = float(rec["QPF_ScaleFactor"])
+        except (TypeError, ValueError):
+            return ""
+        if abs(scale - 1.0) <= 1e-9:
+            return ""
+        return (" The record's ground-to-grid scale is %s, and these distances are the record distances."
+                % scale)
+
+    def _self_check(self, text, area, poly_area, unit, geom, ring):
+        """Read the boundary calls back from the real point of beginning.
+
+        Commencement ties are left out. Not good when a written point is more
+        than about 0.1 ft from the outer boundary. Returns (good, message).
+        """
         boundary = text.split("\n\nLESS AND EXCEPT")[0]
         foot = U.US_SURVEY_FOOT_M if unit == "feet" else 1.0
         try:
+            # False splits a commencement tie off, so only the boundary courses are walked.
             _rows, courses, problems = parse(boundary, foot, boundary_only=False)
-            res = C.compute((0.0, 0.0), courses)
+            pob = W._start(ring[0])
+            res = C.compute(pob, courses, close_to=pob)
+            gap = fit_gap(geom, res.legs) if res.legs else None
         except Exception as e:      # parser gave up - say so rather than hide it
             return False, "Self-check couldn't read the description back: %s" % e
-        sq, big = ("sq ft", 43560.0) if unit == "feet" else ("sq m", 10000.0)
+        big = 43560.0 if unit == "feet" else 10000.0
+        short = "ft" if unit == "feet" else "m"
+        limit = 0.1 if unit == "feet" else 0.1 * 0.3048
         msg = ("Self-check: read back as %d courses; closes within %.3f %s%s. "
                "Describes %.3f %s; the polygon is %.3f %s.") % (
-            len(courses), res.misclose, "ft" if unit == "feet" else "m",
+            len(courses), res.misclose, short,
             "" if res.misclose < 1e-6 else " (1:%s)" % "{:,}".format(int(res.ratio)),
             area / big, "ac" if unit == "feet" else "ha", poly_area / big, "ac" if unit == "feet" else "ha")
         good = not problems and res.misclose < 0.05
+        if gap is None:
+            pass
+        elif gap == float("inf"):
+            good = False
+            msg += " Could not measure the polygon boundary."
+        else:
+            msg += " Farthest call is %.3f %s from the boundary." % (gap, short)
+            if gap > limit:
+                good = False
+                msg += " Over 0.1 ft, the description does not follow the polygon."
         if problems:
             msg += " Couldn't read back: " + "; ".join(problems[:3])
-        return good, msg
+        return good, msg + self._scale_sentence()
 
     def _save(self):
         p, _ = QFileDialog.getSaveFileName(self, "Save legal description", "legal description.txt",

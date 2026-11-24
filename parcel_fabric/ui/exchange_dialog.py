@@ -1,16 +1,57 @@
 # -*- coding: utf-8 -*-
-"""Import an ArcGIS Pro fabric or LandXML; export DXF."""
+"""Import an ArcGIS Pro fabric, a parcel layer, or LandXML; export DXF."""
 
 import os
 
-from qgis.PyQt.QtCore import Qt
+from qgis.core import Qgis
+from qgis.gui import QgsFieldComboBox, QgsMapLayerComboBox
+from qgis.PyQt.QtCore import QDate, Qt
 from qgis.PyQt.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core import exchange as X
+from ..core.fabric import PROP_FABRIC
+
+_NUMBER_FIELDS = ("PARCELNO", "PARCEL_NO", "PARCELNUM", "PARCEL_NUM", "PARCELID", "PARCEL_ID",
+                  "PIN", "STRAP", "FOLIO", "PARCEL", "ParcelNumber", "NAME")
+_DATE_FIELDS = ("DEEDDATE", "DEED_DATE", "RECORDDATE", "RECORDED", "RECORD_DATE", "SALEDATE",
+                "SALE_DATE", "DOCDATE", "DOC_DATE", "DATE")
+_LOT_FIELDS = ("LOT", "LOT_NO", "LOTNO", "LOT_NUM", "LOTNUM")
+_BLOCK_FIELDS = ("BLOCK", "BLK", "BLOCK_NO", "BLOCKNO")
+_SUB_FIELDS = ("SUBDIVISION", "SUBDIV", "SUB_NAME", "SUBNAME", "SUB")
+_NAME_FIELDS = ("NAME", "SUBDIVISION", "SUB_NAME", "SUBNAME", "SUBDIV")
+
+_LAYER_INFO = {
+    "Parcels": "Each parcel id becomes its own record. The record name and parcel id are that "
+               "number, and book and page stay blank. Map a date field onto the recorded date. "
+               "Split history links -001, -002 and so on to the parent suffix, and retires the "
+               "parent only when a child has a later date. Leave it off when the suffix is not a "
+               "split. No boundary lines are created. The same outline is imported once. A text "
+               "field keeps leading zeros. A multi-polygon parcel keeps every part, and true "
+               "curves stay curves.",
+    "Lots": "Copies lot polygons into the Lots table. Tax parcels stay in Parcels. A lot drawn "
+            "with Subdivide Block stays in Parcels.",
+    "Subdivisions": "Copies subdivision polygons into the Subdivisions table.",
+}
+
+
+def _guess_field(layer, candidates):
+    if layer is None:
+        return ""
+    names = {n.lower(): n for n in layer.fields().names()}
+    for cand in candidates:
+        if cand.lower() in names:
+            return names[cand.lower()]
+    return ""
+
+
+def _field_box():
+    box = QgsFieldComboBox()
+    box.setAllowEmptyFieldName(True)
+    return box
 
 
 def _file_row(edit, slot):
@@ -28,14 +69,16 @@ class ExchangeDialog(QDialog):
         self.iface = iface
         self.manager = manager
         self.setWindowTitle("Import / Export")
-        self.resize(620, 480)
+        self.resize(680, 640)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         lay = QVBoxLayout(self)
         tabs = QTabWidget()
         lay.addWidget(tabs)
+        tabs.addTab(self._layer_tab(), "Parcel layer")
         tabs.addTab(self._pro_tab(), "ArcGIS Pro fabric")
         tabs.addTab(self._xml_tab(), "LandXML")
         tabs.addTab(self._dxf_tab(), "DXF export")
+        tabs.addTab(self._roll_tab(), "Tax roll")
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(120)
@@ -58,6 +101,189 @@ class ExchangeDialog(QDialog):
         if not rid:
             QMessageBox.warning(self, self.windowTitle(), "Set an active record first (Records panel).")
         return rid
+
+    # ------------------------------------------------------------------
+    def _layer_tab(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        self.layer_info = QLabel()
+        self.layer_info.setWordWrap(True)
+        lay.addWidget(self.layer_info)
+        form = QFormLayout()
+        self.src_layer = QgsMapLayerComboBox()
+        self.src_layer.setFilters(Qgis.LayerFilter.PolygonLayer)
+        from qgis.core import QgsProject
+        self.src_layer.setExceptedLayerList([lx for lx in QgsProject.instance().mapLayers().values()
+                                             if lx.customProperty(PROP_FABRIC)])
+        self.src_file = QLineEdit()
+        self.src_file.setReadOnly(True)
+        self.src_file.setPlaceholderText("shapefile or GeoPackage with one polygon layer")
+        form.addRow("Layer on the map", self.src_layer)
+        form.addRow("Or a file", _file_row(self.src_file, self._pick_parcel_file))
+        self.target = QComboBox()
+        self.target.addItems(["Parcels", "Lots", "Subdivisions"])
+        self.target.currentTextChanged.connect(self._target_changed)
+        form.addRow("Import into", self.target)
+        lay.addLayout(form)
+        self.num_field = _field_box()
+        self.date_field = _field_box()
+        self.lot_field = _field_box()
+        self.lot_sub_field = _field_box()
+        self.lot_block_field = _field_box()
+        self.lot_parcel_field = _field_box()
+        self.sub_name_field = _field_box()
+        self._field_boxes = (
+            (self.num_field, _NUMBER_FIELDS), (self.date_field, _DATE_FIELDS),
+            (self.lot_field, _LOT_FIELDS), (self.lot_sub_field, _SUB_FIELDS),
+            (self.lot_block_field, _BLOCK_FIELDS), (self.lot_parcel_field, _NUMBER_FIELDS),
+            (self.sub_name_field, _NAME_FIELDS))
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._parcel_page())
+        self.stack.addWidget(self._lots_page())
+        self.stack.addWidget(self._sub_page())
+        lay.addWidget(self.stack)
+        b = QPushButton("Import")
+        b.clicked.connect(self._import_layer)
+        lay.addWidget(b)
+        self._file_layer = None
+        self.src_layer.layerChanged.connect(self._use_map_layer)
+        self._use_map_layer(self.src_layer.currentLayer())
+        self._target_changed("Parcels")
+        return w
+
+    def _parcel_page(self):
+        w = QWidget()
+        f = QFormLayout(w)
+        self.layer_type = QComboBox()
+        if self.fab is not None:
+            self.layer_type.addItems(self.fab.parcel_types)
+        self.use_active = QCheckBox("Use the active record instead of one record per parcel id")
+        self.use_active.setEnabled(bool(self.manager.active_record_id))
+        self.use_active.setToolTip("File every polygon under the active record. The date field is not used.")
+        self.history = QCheckBox("Build split history (-001, -002)")
+        self.history.setChecked(True)
+        self.history.setToolTip("Link each suffix to the parent suffix. The parent is retired only "
+                                "when a child has a later recorded date.")
+        self.parent_suffix = QLineEdit("000")
+        self.parent_suffix.setMaximumWidth(80)
+        self.parent_suffix.setToolTip("The original parcel ends with this. 000 matches -000.")
+        self.history.toggled.connect(self.parent_suffix.setEnabled)
+        suf = QHBoxLayout()
+        suf.addWidget(QLabel("Parent suffix"))
+        suf.addWidget(self.parent_suffix)
+        suf.addStretch(1)
+        f.addRow("Parcel number field", self.num_field)
+        f.addRow("Date field", self.date_field)
+        f.addRow("Parcel type", self.layer_type)
+        f.addRow("", self.use_active)
+        f.addRow("", self.history)
+        f.addRow("", suf)
+        return w
+
+    def _lots_page(self):
+        w = QWidget()
+        f = QFormLayout(w)
+        f.addRow("Lot field", self.lot_field)
+        f.addRow("Subdivision field", self.lot_sub_field)
+        f.addRow("Block field", self.lot_block_field)
+        f.addRow("Parcel number field", self.lot_parcel_field)
+        return w
+
+    def _sub_page(self):
+        w = QWidget()
+        f = QFormLayout(w)
+        f.addRow("Name field", self.sub_name_field)
+        return w
+
+    def _target_changed(self, name):
+        names = ["Parcels", "Lots", "Subdivisions"]
+        self.stack.setCurrentIndex(names.index(name) if name in names else 0)
+        self.layer_info.setText(_LAYER_INFO.get(name, _LAYER_INFO["Parcels"]))
+
+    def _bind_fields(self, layer):
+        for box, names in self._field_boxes:
+            box.setLayer(layer)
+            box.setField(_guess_field(layer, names))
+
+    def _use_map_layer(self, layer):
+        self._file_layer = None
+        self.src_file.clear()
+        self._bind_fields(layer)
+
+    def _pick_parcel_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Parcel layer", self.src_file.text(), "Shapefile or GeoPackage (*.shp *.gpkg)")
+        if not path:
+            return
+        try:
+            layer = X.open_polygon_layer(path)
+        except Exception as e:
+            QMessageBox.warning(self, self.windowTitle(), str(e))
+            return
+        self._file_layer = layer
+        self.src_file.setText(path)
+        self._bind_fields(layer)
+
+    def _import_layer(self):
+        if self.fab is None:
+            QMessageBox.warning(self, self.windowTitle(), "Open a fabric first.")
+            return
+        src = self._file_layer if self._file_layer is not None else self.src_layer.currentLayer()
+        if src is None:
+            QMessageBox.warning(self, self.windowTitle(), "Choose a polygon layer.")
+            return
+        kind = self.target.currentText()
+        try:
+            if kind == "Lots":
+                result = X.import_lots(self.fab, src, self.lot_field.currentField(),
+                                       self.lot_sub_field.currentField(),
+                                       self.lot_block_field.currentField(),
+                                       self.lot_parcel_field.currentField())
+                label = "lots"
+            elif kind == "Subdivisions":
+                result = X.import_subdivisions(self.fab, src, self.sub_name_field.currentField())
+                label = "subdivisions"
+            else:
+                rid = None
+                if self.use_active.isChecked():
+                    rid = self.manager.active_record_id
+                    if not rid:
+                        QMessageBox.warning(self, self.windowTitle(),
+                                            "Set an active record first, or leave that box off.")
+                        return
+                result = X.import_parcel_layer(
+                    self.fab, src, self.layer_type.currentText(), rid,
+                    self.num_field.currentField() or None,
+                    self.date_field.currentField() or None,
+                    self.history.isChecked(), self.parent_suffix.text())
+                label = "parcels"
+        except Exception as e:
+            QMessageBox.critical(self, self.windowTitle(), "Import failed: %s" % e)
+            return
+        ids = result.get("record_ids") or []
+        if kind == "Parcels" and not self.use_active.isChecked() and len(ids) == 1:
+            self.manager.set_active_record(ids[0])
+        self.manager.refresh()
+        self.iface.mapCanvas().refresh()
+        skipped = result.get("skipped") or {}
+        names = (("duplicate", "duplicate number"), ("same", "same outline"),
+                 ("too_long", "number longer than 30 characters"),
+                 ("multipart", "more than one polygon"), ("empty", "empty"))
+        left = ["%d %s" % (skipped[k], text) for k, text in names if skipped.get(k)]
+        bits = ["Imported %d %s." % (result["copied"], label)]
+        if result.get("records"):
+            bits.append("Filed %d records, one per parcel id." % result["records"])
+        if result.get("history_linked"):
+            bits.append("Split history linked %d and retired %d." % (
+                result["history_linked"], result.get("history_retired") or 0))
+        if left:
+            bits.append("Left out: %s." % ", ".join(left))
+        self._say(" ".join(bits))
+        if result.get("backup"):
+            self._say("Several polygons can be one parcel now, curves included. A backup of the fabric was saved at %s."
+                      % result["backup"])
+        elif skipped.get("multipart") and result.get("multipart_note"):
+            self._say(result["multipart_note"])
 
     # ------------------------------------------------------------------
     def _pro_tab(self):
@@ -201,3 +427,50 @@ class ExchangeDialog(QDialog):
             QMessageBox.critical(self, self.windowTitle(), str(e))
             return
         self._say("Wrote %s" % path)
+
+    def _roll_tab(self):
+        w = QWidget()
+        f = QFormLayout(w)
+        note = QLabel("Current parcels, in this fabric's coordinate system, as "
+                      "F_county_mmddyyyy_parcels.shp with PARCELNO, ACRES, TYPE, SUBDIV, BLOCK and LOT. "
+                      "Curves become straight segments in a shapefile. The CSV lists lineage since the date "
+                      "you pick: date, operation, parent number, child number, book, page and child acres.")
+        note.setWordWrap(True)
+        f.addRow(note)
+        self.roll_dir = QLineEdit()
+        f.addRow("Folder", _file_row(self.roll_dir, self._pick_roll_dir))
+        self.roll_county = QLineEdit(self.fab.name if self.fab is not None else "")
+        f.addRow("County", self.roll_county)
+        self.roll_on = QDateEdit(QDate.currentDate())
+        self.roll_on.setCalendarPopup(True)
+        self.roll_on.setDisplayFormat("MM/dd/yyyy")
+        f.addRow("File date", self.roll_on)
+        self.roll_since = QDateEdit(QDate(QDate.currentDate().year(), 1, 1))
+        self.roll_since.setCalendarPopup(True)
+        self.roll_since.setDisplayFormat("MM/dd/yyyy")
+        f.addRow("Changes since", self.roll_since)
+        b = QPushButton("Export tax roll")
+        b.clicked.connect(self._export_roll)
+        f.addRow("", b)
+        return w
+
+    def _pick_roll_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "Folder for the tax-roll shapefile")
+        if path:
+            self.roll_dir.setText(path)
+
+    def _export_roll(self):
+        if self.fab is None:
+            return
+        if not self.roll_dir.text().strip():
+            QMessageBox.warning(self, self.windowTitle(), "Choose a folder.")
+            return
+        try:
+            shp, csv_path, n_parcels, n_changes = X.export_tax_roll(
+                self.fab, self.roll_dir.text().strip(), self.roll_county.text().strip(),
+                self.roll_on.date().toPyDate(), self.roll_since.date().toString("yyyy-MM-dd"))
+        except Exception as e:
+            QMessageBox.critical(self, self.windowTitle(), str(e))
+            return
+        self._say("Wrote %s (%d parcels) and %s (%d changes). Curves are straight segments in the shapefile."
+                  % (shp, n_parcels, csv_path, n_changes))

@@ -44,6 +44,27 @@ def test_split_numbers_continue_from_highest():
     assert N.split_numbers([], "12-4S-16-02942-000", 1) == ["12-4S-16-02942-001"]
 
 
+def test_split_parts_reads_the_suffix():
+    assert N.split_parts("12-4S-16-02942-001") == ("12-4S-16-02942", 1)
+    assert N.split_parts("02-5S-17-09063-000") == ("02-5S-17-09063", 0)
+    assert N.split_parts("12345-002") == ("12345", 2)
+    assert N.split_parts("12345") is None
+    assert N.split_parts("1234567-1234") is None
+
+
+def test_fields_for_keeps_a_roll_id():
+    roll = N.fields_for("1234567-1234")
+    assert roll["ParcelNumber"] == "1234567-1234"
+    assert roll["Section"] is None and roll["Township"] is None and roll["Range"] is None
+    assert roll["ParcelID"] is None and roll["ParcelSeq"] is None and roll["SplitNo"] is None
+    strap = N.fields_for("12-4S-16-02942-000")
+    assert strap["ParcelNumber"] == "12-4S-16-02942-000"
+    assert strap["Section"] == 12 and strap["Township"] == "4S" and strap["Range"] == 16
+    assert strap["ParcelID"] == "02942-000" and strap["ParcelSeq"] == 2942 and strap["SplitNo"] == 0
+    with pytest.raises(N.NumberError):
+        N.fields_for("x" * 31)
+
+
 def test_document_paths():
     v = D.record_values("PB 5 PG 22", "Plat", "5", "22", "2024-03-01", "{ABC-1}")
     rel = D.relative_path(D.DEFAULT_FOLDER, D.DEFAULT_NAME, v, ".PDF")

@@ -8,6 +8,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsGeometry,
     QgsLineString,
+    QgsPointXY,
     QgsProject,
 )
 
@@ -89,3 +90,85 @@ def unit_word(crs):
     if u == Qgis.DistanceUnit.Meters:
         return "meters"
     return None
+
+
+def _segmentized_polygons(geom):
+    seg = QgsGeometry(geom.constGet().segmentize())
+    # asMultiPolygon throws on a single polygon in QGIS 4
+    multi = []
+    one = []
+    try:
+        multi = seg.asMultiPolygon()
+    except TypeError:
+        multi = []
+    if multi:
+        return multi
+    try:
+        one = seg.asPolygon()
+    except TypeError:
+        one = []
+    return [one] if one else []
+
+
+def _exterior_line(geom):
+    """The outer rings as a line. Hole edges are not part of this line."""
+    lines = []
+    for poly in _segmentized_polygons(geom):
+        if not poly or len(poly[0]) < 2:
+            continue
+        lines.append(QgsGeometry.fromPolylineXY(poly[0]))
+    if not lines:
+        return None
+    return lines[0] if len(lines) == 1 else QgsGeometry.collectGeometry(lines)
+
+
+def exterior_vertices(geom):
+    pts = []
+    for poly in _segmentized_polygons(geom):
+        if not poly:
+            continue
+        pts.extend((p.x(), p.y()) for p in poly[0])
+    return pts
+
+
+def boundary_distance(geom, points):
+    """Largest distance from points to the outer boundary, not the polygon fill."""
+    line = _exterior_line(geom)
+    if line is None or line.isEmpty():
+        return float("inf")
+    worst = 0.0
+    for xy in points:
+        d = line.distance(QgsGeometry.fromPointXY(QgsPointXY(xy[0], xy[1])))
+        if d > worst:
+            worst = d
+    return worst
+
+
+def fit_gap(geom, legs):
+    """How far written courses sit from the outer boundary, in map units.
+
+    Samples each course's ends, its midpoint, and a curve's mid-arc point.
+    Also measures outer-ring corners against the written line, so a bend the
+    writer joined into one course still shows up.
+    """
+    if not legs:
+        return 0.0
+    samples = []
+    path = [legs[0].start]
+    for leg in legs:
+        samples.append(leg.start)
+        samples.append(leg.end)
+        if leg.mid:
+            samples.append(leg.mid)
+            path.append(leg.mid)
+        else:
+            samples.append(((leg.start[0] + leg.end[0]) / 2.0, (leg.start[1] + leg.end[1]) / 2.0))
+        path.append(leg.end)
+    worst = boundary_distance(geom, samples)
+    if len(path) >= 2:
+        line = QgsGeometry.fromPolylineXY([QgsPointXY(p[0], p[1]) for p in path])
+        for xy in exterior_vertices(geom):
+            d = line.distance(QgsGeometry.fromPointXY(QgsPointXY(xy[0], xy[1])))
+            if d > worst:
+                worst = d
+    return worst

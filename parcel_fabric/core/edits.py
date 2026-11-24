@@ -407,6 +407,85 @@ def _number_children(fabric, parent, kids, res):
     res.children = [k["ParcelNumber"] or k["Name"] or "#%d" % k.id() for k in kids]
 
 
+def stamp_lots(fabric, parent_gid, subdivision, block, start_lot, front):
+    """Write subdivision, block, lot, width and depth on a Subdivide's children.
+
+    Lot numbers follow the same northwest-to-southeast order as the preview.
+    Width and depth are the rotated box the preview already measures (frontage
+    east-west after rotating by -frontage + 90).
+    """
+    if not parent_gid:
+        return 0
+    if fabric.parcels.fields().indexOf("Lot") < 0:
+        S.add_missing_fields(fabric.parcels, S.ROLE_PARCELS)
+    expr = '"ParentID" = %s AND "Operation" = %s' % (quote(parent_gid), quote("Subdivide"))
+    rows = list(fabric.lineage.getFeatures(QgsFeatureRequest().setFilterExpression(expr)))
+    kids = _by_gid(fabric, [r["ChildID"] for r in rows if r["ChildID"]])
+    kids = [k for k in kids if k.isValid() and not k["RetiredByRecord"] and not k.geometry().isNull()]
+
+    def order(f):
+        p = f.geometry().centroid().asPoint()
+        return (-round(p.y(), 1), round(p.x(), 1))
+
+    kids.sort(key=order)
+    if not kids:
+        return 0
+    with EditSession([fabric.parcels], "Lot numbers") as ed:
+        for i, k in enumerate(kids):
+            g = QgsGeometry(k.geometry())
+            g.rotate(-math.degrees(front) + 90, g.centroid().asPoint())
+            box = g.boundingBox()
+            ed.change(fabric.parcels, k.id(), "Subdivision", subdivision or None)
+            ed.change(fabric.parcels, k.id(), "Block", block or None)
+            ed.change(fabric.parcels, k.id(), "Lot", str(int(start_lot) + i))
+            ed.change(fabric.parcels, k.id(), "LotWidth", box.width())
+            ed.change(fabric.parcels, k.id(), "LotDepth", box.height())
+    return len(kids)
+
+
+def add_stacked_unit(fabric, parent, number, kind, record):
+    """Another current parcel on the parent's polygon. No new boundary lines.
+
+    Build will not adopt this copy when the land parcel is rebuilt. Building the
+    same loop again does not create a second land parcel out of the copy.
+    """
+    _require_record(record)
+    _require_current(fabric, parent)
+    kind = (kind or "").strip().lower()
+    if kind not in ("condo", "common"):
+        raise EditError("Choose condo or common area.")
+    if parent["IsSeed"] == 1:
+        raise EditError("Build the parcel before stacking a unit on it.")
+    if parent.fields().indexOf("QPF_Stack") >= 0 and parent["QPF_Stack"]:
+        raise EditError("Stack the unit on the land parcel, not on another unit.")
+    from . import numbering as N
+    from . import parcel_numbers as PN
+    try:
+        fields = N.fields_for(number)
+    except N.NumberError as e:
+        raise EditError(str(e))
+    if not fields["ParcelNumber"]:
+        raise EditError("Enter the unit's parcel number.")
+    if fabric.parcels.fields().indexOf("QPF_Stack") < 0:
+        S.add_missing_fields(fabric.parcels, S.ROLE_PARCELS)
+    if fields["ParcelNumber"] in PN.used_numbers(fabric):
+        raise EditError("Parcel number %s is already used." % fields["ParcelNumber"])
+    lyr = fabric.parcels
+    feat = _copy_attrs(parent, lyr)
+    feat.setGeometry(QgsGeometry(parent.geometry()))
+    vals = dict(fields)
+    vals.update({"QPF_Stack": kind, "ParentNumber": parent["ParcelNumber"] or None,
+                 "CreatedByRecord": record, "RetiredByRecord": None, "GlobalID": S.new_guid(),
+                 "IsSeed": 0, "Name": fields["ParcelNumber"]})
+    _set(feat, vals)
+    with EditSession([lyr], "Stacked unit") as ed:
+        ed.add(lyr, feat)
+    L.add(fabric, record, "Stack", [parent], [feat])
+    res = EditResult(children=[fields["ParcelNumber"]])
+    res.messages.append("Stacked %s on the same polygon; no new lines." % kind)
+    return res
+
+
 def divide_cuts(parcel_geom, azimuth, mode="equal_area", count=2, area=None, flip=False):
     """Cut lines that divide a parcel with lines parallel to ``azimuth``.
 

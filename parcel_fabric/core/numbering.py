@@ -67,6 +67,49 @@ def parse_number(s):
             "range": int(rng), "pid": int(pid), "split": int(split)}
 
 
+def fields_for(number):
+    """ParcelNumber and its strap parts. A roll ID that is not a strap is stored as typed.
+
+    Section, township, range and the strap pieces are cleared so a county ID is not
+    half a section number. ParcelNumber holds 30 characters, which covers a 26-character roll ID.
+    """
+    text = "" if number is None else str(number).strip()
+    if len(text) > 30:
+        raise NumberError("A parcel number can be at most 30 characters.")
+    p = parse_number(text)
+    if p is None:
+        return {"ParcelNumber": text or None, "Section": None, "Township": None,
+                "Range": None, "ParcelID": None, "ParcelSeq": None, "SplitNo": None}
+    return {"ParcelNumber": text, "Section": p["section"],
+            "Township": "%d%s" % (p["township"], p["twp_dir"]), "Range": p["range"],
+            "ParcelID": "%05d-%03d" % (p["pid"], p["split"]), "ParcelSeq": p["pid"],
+            "SplitNo": p["split"]}
+
+
+_LOOSE_SPLIT = re.compile(r"^(.*)-(\d{1,3})$")
+
+
+def split_parts(number):
+    """(stem, split) when the number ends in -NNN, else None.
+
+    A strap uses its own split: '12-4S-16-02942-001' -> ('12-4S-16-02942', 1).
+    Any other id uses the same tail: '12345-002' -> ('12345', 2). A four-digit
+    tail is not a split, so a roll id like 1234567-1234 stays one number.
+    """
+    text = "" if number is None else str(number).strip()
+    if not text:
+        return None
+    parsed = parse_number(text)
+    if parsed:
+        stem = format_number(parsed["section"], parsed["township"], parsed["twp_dir"],
+                             parsed["range"], parsed["pid"], 0).rsplit("-", 1)[0]
+        return stem, parsed["split"]
+    match = _LOOSE_SPLIT.match(text)
+    if not match or not match.group(1):
+        return None
+    return match.group(1), int(match.group(2))
+
+
 def str_key(section, twp, twp_dir, rng):
     return (int(section), int(twp), str(twp_dir).upper(), int(rng))
 

@@ -54,8 +54,11 @@ class RecordDialog(QDialog):
         bp.addWidget(self.book)
         bp.addWidget(QLabel("Page"))
         bp.addWidget(self.page)
+        self.parcel_id = QLineEdit(str(values.get("parcel_id") or ""))
+        self.parcel_id.setPlaceholderText("Tax roll id, when there is no book and page")
+        self.parcel_id.setMaxLength(30)
         self.name = QLineEdit(str(values.get("name") or ""))
-        self.name.setPlaceholderText("Leave blank to use type, book and page")
+        self.name.setPlaceholderText("Leave blank to use the type, book and page, or the parcel id")
         self.has_date = QCheckBox("Recorded on")
         d = values.get("date")
         self.date = QDateEdit(d if isinstance(d, QDate) and d.isValid() else QDate.currentDate())
@@ -103,6 +106,7 @@ class RecordDialog(QDialog):
 
         form.addRow("Type", self.rtype)
         form.addRow("Book", bp)
+        form.addRow("Parcel ID", self.parcel_id)
         form.addRow("Name", self.name)
         form.addRow(self.has_date, self.date)
         form.addRow("Document", drow)
@@ -120,7 +124,7 @@ class RecordDialog(QDialog):
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
-        for w in (self.book, self.page, self.name):
+        for w in (self.book, self.page, self.parcel_id, self.name):
             w.textChanged.connect(self._update_hint)
         self.rtype.currentTextChanged.connect(self._update_hint)
         self._update_hint()
@@ -158,8 +162,10 @@ class RecordDialog(QDialog):
         self._update_hint()
 
     def _ok(self):
-        if not (self.name.text().strip() or self.book.text().strip() or self.page.text().strip()):
-            QMessageBox.warning(self, self.windowTitle(), "Enter a book and page, or a name.")
+        if not (self.name.text().strip() or self.book.text().strip() or self.page.text().strip()
+                or self.parcel_id.text().strip()):
+            QMessageBox.warning(self, self.windowTitle(),
+                                "Enter a book and page, a parcel id, or a name.")
             return
         self.accept()
 
@@ -167,12 +173,15 @@ class RecordDialog(QDialog):
     def values(self):
         rtype = self.rtype.currentText().strip()
         book, page = self.book.text().strip(), self.page.text().strip()
+        parcel_id = self.parcel_id.text().strip()
         name = self.name.text().strip()
         if not name:
-            name = " ".join(p for p in [rtype, "Book %s" % book if book else "",
-                                        "Page %s" % page if page else ""] if p)
+            bits = [rtype, "Book %s" % book if book else "", "Page %s" % page if page else ""]
+            if parcel_id and not (book or page):
+                bits.append(parcel_id)
+            name = " ".join(p for p in bits if p)
         return {
-            "name": name, "rtype": rtype, "book": book, "page": page,
+            "name": name, "rtype": rtype, "book": book, "page": page, "parcel_id": parcel_id,
             "date": self.date.date() if self.has_date.isChecked() else None,
             "doc_url": self.doc.text().strip(), "basis": self.basis.text().strip(),
             "notes": self.notes.toPlainText().strip(),

@@ -18,6 +18,7 @@ CHECKS = [
     ("no_type", "Parcels or parcel lines with no (or an unknown) parcel type"),
     ("numbers", "Parcels without a number, or with a number used twice"),
     ("record_dates", "Records with parcels but no recorded date (Parcel History can't place them)"),
+    ("gaps", "Overlaps, and gaps wider than the snap tolerance but still a sliver"),
 ]
 
 
@@ -94,6 +95,8 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
     numbered = set(fabric.number_types)
     seen_numbers = {}
     lyr = fabric.parcels
+    gap_items = []
+    stack_i = lyr.fields().indexOf("QPF_Stack")
     for t in ptypes:
         if feedback:
             feedback("Checking %s parcels" % t)
@@ -108,6 +111,9 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                     issues.append(Issue("info", "Seed %s has not been built" % name,
                                         p.x(), p.y(), lyr.id(), f.id()))
                 continue
+            if "gaps" in checks:
+                stack = f[stack_i] if stack_i >= 0 else ""
+                gap_items.append(("%s %s" % (t, name), t, stack or "", g))
             ratio = _num(f["MiscloseRatio"])
             dist = _num(f["MiscloseDistance"])
             if "misclose" in checks and dist and ratio and ratio < fabric.warn_ratio:
@@ -135,6 +141,9 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                                         p.x(), p.y(), lyr.id(), f.id()))
                 else:
                     seen_numbers[num] = f.id()
+    if gap_items:
+        for sev, msg, x, y in neighbor_issues(gap_items, tol):
+            issues.append(Issue(sev, msg, x, y, lyr.id(), None))
     if "record_dates" in checks:
         from .history import undated_records
         for gid in undated_records(fabric):
@@ -144,6 +153,66 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                                 "place its parcels in time" % name,
                                 layer_id=fabric.records.id(), fid=rec.id() if rec is not None else None))
     return issues
+
+
+def neighbor_issues(items, tol):
+    """Overlaps and sliver gaps between current parcels of the same type.
+
+    ``items`` are (name, parcel type, stack flag, QgsGeometry). A stacked unit
+    (condo or common area) that sits on its parent is not an overlap. Two
+    stacked units on the same land are not compared.
+
+    shortcut: a gap wider than max(tol*50, 1 map unit) is left alone (a road,
+    not a sliver). Shared-boundary GEOS noise under max(tol*tol, 1e-4) is not
+    an overlap.
+    """
+    from qgis.core import QgsFeature, QgsSpatialIndex
+
+    tol = float(tol)
+    near = max(tol * 50.0, 1.0)
+    area_min = max(tol * tol, 1e-4)
+    index = QgsSpatialIndex()
+    geoms = []
+    for name, ptype, stack, geom in items:
+        if geom is None or geom.isNull() or geom.isEmpty():
+            continue
+        feat = QgsFeature()
+        feat.setId(len(geoms))
+        feat.setGeometry(geom)
+        index.addFeature(feat)
+        geoms.append((name, ptype, str(stack or "").strip(), geom))
+    out = []
+    for i, (name, ptype, stack, geom) in enumerate(geoms):
+        box = geom.boundingBox()
+        box.grow(near)
+        for j in index.intersects(box):
+            if j <= i:
+                continue
+            oname, otype, ostack, ogeom = geoms[j]
+            if otype != ptype:
+                continue
+            if stack and ostack:
+                continue
+            try:
+                inter = geom.intersection(ogeom)
+                ia = 0.0 if inter.isEmpty() else inter.area()
+            except Exception:
+                continue
+            smaller = min(geom.area(), ogeom.area())
+            if (stack or ostack) and smaller > 0 and ia >= 0.99 * smaller:
+                continue
+            if ia > area_min:
+                p = geom.pointOnSurface().asPoint()
+                out.append(("error", "%s overlaps %s" % (name, oname), p.x(), p.y()))
+                continue
+            if stack or ostack:
+                continue
+            dist = geom.distance(ogeom)
+            if tol < dist <= near:
+                p = geom.pointOnSurface().asPoint()
+                out.append(("warning", "%s and %s have a %.2f gap (wider than the snap tolerance)"
+                            % (name, oname, dist), p.x(), p.y()))
+    return out
 
 
 def _num(v):

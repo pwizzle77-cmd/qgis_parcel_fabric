@@ -29,12 +29,8 @@ class NumberingNotSetUp(RuntimeError):
 
 
 def number_fields(number):
-    """ParcelNumber and its parts as field values."""
-    p = N.parse_number(number)
-    return {"ParcelNumber": number, "Section": p["section"],
-            "Township": "%d%s" % (p["township"], p["twp_dir"]), "Range": p["range"],
-            "ParcelID": "%05d-%03d" % (p["pid"], p["split"]), "ParcelSeq": p["pid"],
-            "SplitNo": p["split"]}
+    """ParcelNumber and its parts as field values. A non-strap roll ID is stored as typed."""
+    return N.fields_for(number)
 
 
 def unfiltered(layer):

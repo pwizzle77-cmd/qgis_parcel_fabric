@@ -3,4 +3,4 @@ try:
     import qgis.core  # noqa: F401
     collect_ignore = []
 except ImportError:
-    collect_ignore = ["test_qgis.py"]
+    collect_ignore = ["test_qgis.py", "test_qgis_office.py"]

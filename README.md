@@ -5,14 +5,16 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.10.1, experimental.** Test it on a copy of real data before
+**Status: 0.10.2, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.1.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.2.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
-3. Enable **Parcel Fabric**. It adds a **Parcel Fabric** toolbar and menu.
+3. Enable **Parcel Fabric**. The toolbar shows Records, Traverse, Build, Assign Parcel
+   Numbers and Check Fabric, plus the active record. **More** holds the rest. The same
+   commands are in the **Parcel Fabric** menu.
 
 Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
 
@@ -78,17 +80,20 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    township, range (and optional N/S) fields - existing setups keep working.
    Needs internet for the default; if it's unreachable, parcels are built un-numbered
    with a message and can be numbered later.
-6. **Assign Parcel Numbers** – numbers look like `12-4S-16-02942-000`. Select
-   parcels, then either give them the next unused ID in their
-   section-township-range (split `000`), or number them as splits of a parent:
+6. **Assign Parcel Numbers** – the strap generator still makes numbers like
+   `12-4S-16-02942-000`. Select parcels, then either give them the next unused ID in
+   their section-township-range (split `000`), or number them as splits of a parent:
    `-001`, `-002`... continuing from the highest split already used, north-west
    to south-east. The parent can be retired by the active record at the same
-   time. Retired numbers are never reused. Each parcel also gets its parts:
-   `Section` 12, `Township` 4S, `Range` 16, `ParcelID` `02942-000` (the number
-   without section-township-range), `ParcelSeq` 2942 and `SplitNo` 0.
+   time. Retired numbers are never reused. A strap also fills `Section` 12,
+   `Township` 4S, `Range` 16, `ParcelID` `02942-000`, `ParcelSeq` 2942 and `SplitNo` 0.
+   **Type each parcel's roll ID** stores the county's own parcel ID as typed
+   (up to 30 characters) and clears those strap parts.
 7. **Check Fabric** – open loops, lines without COGO, line ends without points,
    poor misclose, stated vs calculated area over 1%, unbuilt seeds, features with
-   no record. Double-click a row to zoom.
+   no record, overlaps, and gaps wider than the snap tolerance but still a sliver
+   (a road-width opening is left alone). A condo or common-area unit that sits on
+   its land parcel is not an overlap. Double-click a row to zoom.
 
 Ground to grid: set `QPF_ScaleFactor` and `QPF_Rotation` (degrees) on the record.
 Traverse applies them to the geometry; lines keep the record dimensions and store
@@ -130,6 +135,9 @@ features selected in **Parcels** (or **Parcel Lines**) and stay open for the nex
   makes each polygon its own parcel again. Misclose is the worst polygon's and the area is
   the total. A deed split keeps every remaining polygon under the parent's number. Separate
   a parcel before using Divide or Subdivide on it.
+- **Stacked Unit** (More menu) – a condo or common-area parcel on the same polygon
+  as the land parcel, with its own parcel number and no new boundary lines. Build
+  leaves that copy alone. Do not build the same area again expecting a new loop.
 - **Copy Parallel** – offset copies of selected lines (straight or curved) to the
   right or left, into a parcel type or Connections; corner points are added.
 - **Parcel Lineage** – parents and children of a parcel, current or retired, by
@@ -168,7 +176,11 @@ kept up to date after every build, split, divide, merge and record edit.
   non-tangent; curves that were densified into many vertices are recognised again;
   near-straight vertices are joined. Holes become LESS AND EXCEPT parts. `{str}` in
   the opening line fills in the section, township and range. A **self-check** reads
-  the description back and closes it, so a wrong call can't slip through.
+  the boundary calls back from the point of beginning (a commencement tie is left
+  out), closes them, and reports the farthest written point from the polygon
+  boundary. More than about 0.1 foot is marked not good. If the parcel's record
+  has a ground-to-grid scale other than 1, the check says so. The written distances
+  stay the record distances.
 - **Compare with Existing Parcels** – pairs fabric parcels (selected, in view, or all)
   with an existing parcel layer, by parcel number or by overlap, and lists area
   difference, largest offset, shift and overlap. **Show Differences on Map** adds
@@ -258,7 +270,10 @@ The solver is built in (numpy). DynAdjust isn't wired in yet; very large network
   **Start from the other end** flips where the first lot starts.
 - **Zoning** – minimum area and frontage; Preview lists every lot's acres and frontage
   and flags the ones that fail. Apply cuts the block under the active record
-  (operation "Subdivide"), with lineage, like Divide.
+  (operation "Subdivide"), with lineage, like Divide, and stores the subdivision
+  name, block, lot (from the number you set, northwest to southeast) and each lot's
+  width and depth. Parcel labels show the lot and that width x depth, and the
+  acreage when the polygon is over 1 acre.
 
 **Address Lots (NENA)** asks the *NENA Addressing and RCL Tools* plugin for each selected
 lot's house number (its own ranging, parity and spacing; nearest centerline, a point
@@ -269,6 +284,28 @@ says so.
 
 **Import / Export...**
 
+- **Parcel layer** – a shapefile, GeoPackage, or polygon layer already on the map, for an
+  office that was not keeping a fabric. Choose what to import:
+  - **Parcels** – each parcel id becomes its own record. The record name and parcel id
+    are that number, and book and page stay blank. Map a date field onto the recorded
+    date. **Build split history** links `-001`, `-002` and so on to the parent suffix
+    (default `000`) and retires that parent only when a child has a later date. A parcel
+    with no number shares one record named "Existing parcels". Or tick **Use the active
+    record** to file the whole layer under one record. A text field keeps leading zeros.
+    A strap still fills section, township and range. Any other id is stored as typed.
+    No boundary lines or points are created. A parcel that is several polygons keeps
+    those polygons, and true curves stay curves. A GeoPackage that still stores one
+    polygon per parcel is switched so they fit, and a backup of the file is saved first.
+    The same outline is imported once; a condo or common area on that outline is
+    **More → Stacked Unit**.
+  - **Lots** – lot polygons go in the Lots table (lot, subdivision, block, and the tax
+    parcel number). Tax parcels stay in Parcels. A lot drawn with Subdivide Block stays
+    in Parcels.
+  - **Subdivisions** – subdivision polygons go in the Subdivisions table.
+  Later deeds are traversed on top of this map. A record can be filed with a parcel id
+  and no book or page. On a Florida strap the parcel number and the tax roll id are the
+  same text (`02-5S-17-09063-000`). Parcel ID on the parcel is the piece without
+  section-township-range (`09063-000`), and the split is the suffix.
 - **ArcGIS Pro fabric** – a File Geodatabase or GeoPackage export of a Pro fabric
   (`Records`, `Points`, `Connections`, `<Type>` and `<Type>_Lines`). Values copy by
   field name (GlobalIDs and record links kept); each Pro type lands in `Parcels` /
@@ -279,6 +316,10 @@ says so.
   the fabric's CRS.
 - **DXF export** – current lines, connections, points and parcels with symbols and labels,
   whole fabric or the current view.
+- **Tax roll** – current parcels to `F_county_mmddyyyy_parcels.shp` in the fabric's
+  coordinate system, with `PARCELNO`, `ACRES`, `TYPE`, `SUBDIV`, `BLOCK` and `LOT`.
+  Curves become straight segments. A CSV lists lineage since a date you pick
+  (date, operation, parent number, child number, book, page, child acres).
 
 **Shared fabrics.** Fabric Settings → **Multi-user** installs database rules (PostgreSQL,
 SQL Server or GeoPackage triggers): once a feature is retired its `RetiredByRecord` can't

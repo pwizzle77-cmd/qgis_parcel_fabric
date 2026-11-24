@@ -5,7 +5,7 @@ import os
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QApplication, QMessageBox
+from qgis.PyQt.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QToolButton
 
 try:
     from qgis.PyQt.QtGui import QAction
@@ -36,65 +36,110 @@ class ParcelFabricPlugin:
         self.manager = FabricManager()
         self.toolbar = self.iface.addToolBar("Parcel Fabric")
         self.toolbar.setObjectName("ParcelFabricToolbar")
-        self._add("new_fabric", "New Fabric...", self.new_fabric,
-                  "Create a parcel fabric in a GeoPackage or database")
-        self._add("add_fabric", "Add Fabric to Map...", self.open_fabric,
-                  "Add an existing parcel fabric to this project")
-        self.toolbar.addSeparator()
         self._add("records", "Records", self.show_records,
                   "Records panel: create records, set the active record, build parcels")
         self._add("traverse", "Traverse", self.show_traverse,
                   "Enter courses from a plat or deed and create fabric lines")
         self._add("build", "Build Active Record", self.build_active,
                   "Build parcels from the active record's closed loops")
-        self.toolbar.addSeparator()
-        self._add("split", "Split Parcel", lambda: self._window("split"),
-                  "Cut a parcel with a line you draw; pieces become new parcels")
-        self._add("divide", "Divide Parcel", lambda: self._window("divide"),
-                  "Divide a parcel into equal areas, equal widths or set-area lots")
-        self._add("merge", "Merge Parcels", lambda: self._window("merge"),
-                  "Combine parcels into one, touching or not")
-        self._add("split", "Separate Multi-Polygon Parcel", lambda: self._window("separate"),
-                  "Make each polygon of a parcel its own parcel")
-        self._add("copy_parallel", "Copy Parallel", lambda: self._window("copy_parallel"),
-                  "Offset copies of fabric lines (easements, right of way)")
-        self._add("lineage", "Parcel Lineage", lambda: self._window("lineage"),
-                  "Where a parcel came from and what it became")
-        self._add("history", "Parcel History", lambda: self._window("history"),
-                  "A parcel's splits and merges on the map, step by step through time")
-        self.toolbar.addSeparator()
-        self._add("legal_writer", "Write Legal Description", lambda: self._window("legal_writer"),
-                  "Metes-and-bounds description of the polygon selected in ANY layer")
-        self._add("compare", "Compare with Existing Parcels", lambda: self._window("compare"),
-                  "Area difference, offsets and slivers between fabric parcels and an existing parcel layer")
-        self._add("adjust", "Least-Squares Adjustment", lambda: self._window("adjust"),
-                  "Consistency check of record dimensions, or a weighted adjustment to control")
-        self._add("subdivide", "Subdivide Block", lambda: self._window("subdivide"),
-                  "Lay out lots along a street frontage with zoning checks")
-        self._add("address", "Address Lots (NENA)", lambda: self._window("address"),
-                  "House numbers for new lots from the NENA Addressing and RCL Tools plugin")
-        self.toolbar.addSeparator()
         self._add("numbers", "Assign Parcel Numbers", self.assign_numbers,
-                  "Number the selected parcels (new parcels or splits of a parent)")
+                  "Number the selected parcels, or type the roll's parcel ID")
         self._add("check", "Check Fabric", self.check_fabric,
-                  "Find open loops, missing COGO, bad misclose and other problems")
-        self._add("exchange", "Import / Export...", lambda: self._window("exchange"),
-                  "Import an ArcGIS Pro fabric or LandXML; export DXF")
-        self.toolbar.addSeparator()
-        self._add("settings", "Fabric Settings...", self.fabric_settings,
-                  "Parcel types, document folder and naming, parcel numbering, tolerances")
+                  "Find open loops, gaps, overlaps, missing COGO and other problems")
+        self._rec_lbl = QLabel("No active record")
+        self._rec_lbl.setStyleSheet("font-weight: bold; padding: 0 8px;")
+        self.toolbar.addWidget(self._rec_lbl)
+        self.manager.activeRecordChanged.connect(self._show_record)
+        self.manager.activeFabricChanged.connect(self._show_record)
+        self._show_record()
+        self._more_menu = QMenu(self.toolbar)
+        self._more_btn = QToolButton(self.toolbar)
+        self._more_btn.setText("More")
+        self._more_btn.setIcon(icon("fabric"))
+        self._more_btn.setToolTip("The rest of the parcel tools")
+        self._more_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._more_btn.setMenu(self._more_menu)
+        self.toolbar.addWidget(self._more_btn)
+        self._more("new_fabric", "New Fabric...", self.new_fabric,
+                   "Create a parcel fabric in a GeoPackage or database")
+        self._more("add_fabric", "Add Fabric to Map...", self.open_fabric,
+                   "Add an existing parcel fabric to this project")
+        self._more_menu.addSeparator()
+        self._more("split", "Split Parcel", lambda: self._window("split"),
+                   "Cut a parcel with a line you draw; pieces become new parcels")
+        self._more("divide", "Divide Parcel", lambda: self._window("divide"),
+                   "Divide a parcel into equal areas, equal widths or set-area lots")
+        self._more("merge", "Merge Parcels", lambda: self._window("merge"),
+                   "Combine parcels into one, touching or not")
+        self._more("split", "Separate Multi-Polygon Parcel", lambda: self._window("separate"),
+                   "Make each polygon of a parcel its own parcel")
+        self._more("copy_parallel", "Copy Parallel", lambda: self._window("copy_parallel"),
+                   "Offset copies of fabric lines (easements, right of way)")
+        self._more("fabric", "Stacked Unit...", lambda: self._window("stack"),
+                   "Another parcel number on the same polygon (condo or common area), with no new lines")
+        self._more_menu.addSeparator()
+        self._more("lineage", "Parcel Lineage", lambda: self._window("lineage"),
+                   "Where a parcel came from and what it became")
+        self._more("history", "Parcel History", lambda: self._window("history"),
+                   "A parcel's splits and merges on the map, step by step through time")
+        self._more("legal_writer", "Write Legal Description", lambda: self._window("legal_writer"),
+                   "Metes-and-bounds description of the polygon selected in ANY layer")
+        self._more("compare", "Compare with Existing Parcels", lambda: self._window("compare"),
+                   "Area difference, offsets and slivers between fabric parcels and an existing parcel layer")
+        self._more("adjust", "Least-Squares Adjustment", lambda: self._window("adjust"),
+                   "Consistency check of record dimensions, or a weighted adjustment to control")
+        self._more("subdivide", "Subdivide Block", lambda: self._window("subdivide"),
+                   "Lay out lots along a street frontage and store the lot, width and depth")
+        self._more("address", "Address Lots (NENA)", lambda: self._window("address"),
+                   "House numbers for new lots from the NENA Addressing and RCL Tools plugin")
+        self._more_menu.addSeparator()
+        self._more("exchange", "Import / Export...", lambda: self._window("exchange"),
+                   "Import a parcel layer, an ArcGIS Pro fabric, or LandXML; export a tax-roll shapefile or DXF")
+        self._more("settings", "Fabric Settings...", self.fabric_settings,
+                   "Parcel types, document folder and naming, parcel numbering, tolerances")
 
-    def _add(self, icon_name, text, slot, tip):
+    def _action(self, icon_name, text, slot, tip):
         a = QAction(icon(icon_name), text, self.iface.mainWindow())
         a.setToolTip(tip)
         a.setStatusTip(tip)
         a.triggered.connect(slot)
-        self.toolbar.addAction(a)
         self.iface.addPluginToMenu(MENU, a)
         self.actions.append(a)
         return a
 
+    def _add(self, icon_name, text, slot, tip):
+        a = self._action(icon_name, text, slot, tip)
+        self.toolbar.addAction(a)
+        return a
+
+    def _more(self, icon_name, text, slot, tip):
+        a = self._action(icon_name, text, slot, tip)
+        self._more_menu.addAction(a)
+        return a
+
+    def _show_record(self, *_):
+        rec = self.manager.active_record() if self.manager is not None else None
+        if rec is None:
+            self._rec_lbl.setText("No active record")
+        else:
+            name = rec["Name"] or "Record"
+            book, page = rec["Book"], rec["Page"]
+            pid = rec["QPF_ParcelID"] if rec.fields().indexOf("QPF_ParcelID") >= 0 else ""
+            if book or page:
+                name += "   Book %s  Page %s" % (book or "-", page or "-")
+            elif pid and str(pid) not in name:
+                name += "   %s" % pid
+            self._rec_lbl.setText(name)
+        self._rec_lbl.adjustSize()
+
     def unload(self):
+        if self.manager is not None:
+            for sig in (self.manager.activeRecordChanged, self.manager.activeFabricChanged):
+                try:
+                    sig.disconnect(self._show_record)
+                except (TypeError, RuntimeError):
+                    pass
         for w in list(self._windows.values()):
             try:
                 w.close()
@@ -239,9 +284,10 @@ class ParcelFabricPlugin:
         from .ui.address_lots_dialog import AddressLotsDialog
         from .ui.exchange_dialog import ExchangeDialog
         from .ui.lineage_dialog import LineageDialog
+        from .ui.stack_dialog import StackDialog
         cls = {"subdivide": ED.SubdivideWindow, "address": AddressLotsDialog, "exchange": ExchangeDialog,
                "split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
-               "separate": ED.SeparateWindow,
+               "separate": ED.SeparateWindow, "stack": StackDialog,
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
                "history": HistoryDialog, "legal_writer": LegalWriterDialog,
                "compare": CompareDialog, "adjust": AdjustDialog}[kind]

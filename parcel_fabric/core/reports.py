@@ -144,13 +144,16 @@ def closure_report(fabric, record_gid, path):
 h3{font-size:15px;margin:22px 0 6px;border-top:1px solid #ccc;padding-top:12px}
 table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #ddd;padding:3px 8px;text-align:left}
 .m{color:#666;font-size:12px}.bad{color:#b3261e}</style></head><body>
-<h1>Closure report: %s</h1><p class=m>%s &middot; Book %s, Page %s &middot; recorded %s%s<br>Basis of bearing: %s
+<h1>Closure report: %s</h1><p class=m>%s &middot; Book %s, Page %s%s &middot; recorded %s%s<br>Basis of bearing: %s
 &middot; %d parcel(s) &middot; prepared %s</p>
 <table><tr><th>Parcel</th><th>Precision</th><th>Area by record (ac)</th><th>Area by coordinates (ac)</th>
 <th>Stated</th></tr>%s</table>%s</body></html>""" % (
         html.escape(str(rec["Name"] or "")), html.escape(str(rec["Name"] or "")),
         html.escape(str(rec["RecordType"] or "")), html.escape(str(rec["Book"] or "-")),
-        html.escape(str(rec["Page"] or "-")), dtxt or "-", doc_html,
+        html.escape(str(rec["Page"] or "-")),
+        (" &middot; Parcel %s" % html.escape(str(rec["QPF_ParcelID"])))
+        if rec.fields().indexOf("QPF_ParcelID") >= 0 and rec["QPF_ParcelID"] else "",
+        dtxt or "-", doc_html,
         html.escape(str(rec["QPF_BasisOfBearing"] or "-")), len(parcels), datetime.date.today().isoformat(),
         summary, "".join(blocks))
     with open(path, "w", encoding="utf-8") as fh:

@@ -44,12 +44,14 @@ _CURVE_FORM = {DIR_CHORD: "Chord", DIR_RADIAL: "Radial", DIR_TANGENT: "Tangent",
 LAYER_LABELS = {S.ROLE_RECORDS: "Records", S.ROLE_POINTS: "Points",
                 S.ROLE_CONNECTIONS: "Connections", S.ROLE_PARCELS: "Parcels",
                 S.ROLE_LINES: "Parcel Lines", S.ROLE_SETTINGS: "Fabric settings",
-                S.ROLE_LINEAGE: "Parcel Lineage"}
+                S.ROLE_LINEAGE: "Parcel Lineage", S.ROLE_LOTS: "Lots",
+                S.ROLE_SUBDIVISIONS: "Subdivisions"}
 
 # record dialog key -> Records field
 RECORD_MAP = {"name": "Name", "rtype": "RecordType", "date": "RecordedDate", "book": "Book",
-              "page": "Page", "doc_url": "QPF_DocumentURL", "basis": "QPF_BasisOfBearing",
-              "notes": "QPF_Notes", "scale": "QPF_ScaleFactor", "rotation": "QPF_Rotation"}
+              "page": "Page", "parcel_id": "QPF_ParcelID", "doc_url": "QPF_DocumentURL",
+              "basis": "QPF_BasisOfBearing", "notes": "QPF_Notes", "scale": "QPF_ScaleFactor",
+              "rotation": "QPF_Rotation"}
 
 
 def quote(v):
@@ -92,10 +94,12 @@ class Fabric:
         st.setCustomProperty(PROP_FABRIC, fid)
         st.setCustomProperty(PROP_ROLE, S.ROLE_SETTINGS)
         layers = {S.ROLE_SETTINGS: st}
-        S.ensure_table(conn, schema, prefix, S.ROLE_LINEAGE, st.crs() if st.crs().isValid()
-                       else QgsCoordinateReferenceSystem(settings.get("crs", "")))
+        crs = st.crs() if st.crs().isValid() else QgsCoordinateReferenceSystem(settings.get("crs", ""))
+        multipart = provider in S.MULTIPART_PROVIDERS
+        for role in (S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+            S.ensure_table(conn, schema, prefix, role, crs, multipart)
         for role in (S.ROLE_RECORDS, S.ROLE_POINTS, S.ROLE_CONNECTIONS, S.ROLE_PARCELS, S.ROLE_LINES,
-                     S.ROLE_LINEAGE):
+                     S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
             lyr = S.load_table(conn, provider, schema, S.table_name(prefix, role), LAYER_LABELS[role])
             if role == S.ROLE_PARCELS:
                 S.migrate_parcel_id(lyr)
@@ -131,7 +135,16 @@ class Fabric:
             settings = S.read_settings(layers[S.ROLE_SETTINGS])
             for k, v in S.DEFAULT_SETTINGS.items():
                 settings.setdefault(k, v)
-            out.append(cls(fid, settings, layers))
+            fab = cls(fid, settings, layers)
+            for role in (S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+                if layers.get(role) is None:
+                    try:
+                        fab._open_role(role)
+                    except Exception as e:
+                        from qgis.core import Qgis, QgsMessageLog
+                        QgsMessageLog.logMessage("Could not open %s: %s" % (role, e),
+                                                 "Parcel Fabric", Qgis.MessageLevel.Warning)
+            out.append(fab)
         return out
 
     # ------------------------------------------------------------------
@@ -172,6 +185,14 @@ class Fabric:
         return self.layers[S.ROLE_PARCELS]
 
     @property
+    def lots(self):
+        return self._open_role(S.ROLE_LOTS)
+
+    @property
+    def subdivisions(self):
+        return self._open_role(S.ROLE_SUBDIVISIONS)
+
+    @property
     def lines(self):
         return self.layers[S.ROLE_LINES]
 
@@ -202,14 +223,28 @@ class Fabric:
     @property
     def lineage(self):
         """Parcel_Lineage table; opened next to Parcels when the project lacks it."""
-        lyr = self.layers.get(S.ROLE_LINEAGE)
-        if lyr is None:
-            lyr = _sibling_table(self.parcels, S.table_name(self.settings.get("prefix", ""),
-                                                            S.ROLE_LINEAGE), self)
-            lyr.setCustomProperty(PROP_FABRIC, self.id)
-            lyr.setCustomProperty(PROP_ROLE, S.ROLE_LINEAGE)
-            QgsProject.instance().addMapLayer(lyr, False)
-            self.layers[S.ROLE_LINEAGE] = lyr
+        return self._open_role(S.ROLE_LINEAGE)
+
+    def _open_role(self, role):
+        """Open a table a newer plugin added, and show it in this fabric's group."""
+        lyr = self.layers.get(role)
+        if lyr is not None:
+            return lyr
+        lyr = _sibling_table(self.parcels, role, self)
+        lyr.setCustomProperty(PROP_FABRIC, self.id)
+        lyr.setCustomProperty(PROP_ROLE, role)
+        self.layers[role] = lyr
+        project = QgsProject.instance()
+        if project.mapLayer(lyr.id()) is None:
+            project.addMapLayer(lyr, False)
+            group = project.layerTreeRoot().findGroup(self.name)
+            if group is not None:
+                node = group.addLayer(lyr)
+                if role == S.ROLE_LINEAGE:
+                    node.setItemVisibilityChecked(False)
+                elif role in (S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+                    from . import styles
+                    styles.apply(lyr, self.parcel_types)
         return lyr
 
     @property
@@ -288,7 +323,10 @@ class Fabric:
         project = project or QgsProject.instance()
         root = project.layerTreeRoot()
         group = root.insertGroup(0, self.name)
-        for lyr in (self.points, self.lines, self.parcels, self.connections, self.records):
+        for lyr in (self.points, self.lines, self.parcels, self.layers.get(S.ROLE_LOTS),
+                    self.layers.get(S.ROLE_SUBDIVISIONS), self.connections, self.records):
+            if lyr is None:
+                continue
             project.addMapLayer(lyr, False)
             group.addLayer(lyr)
             styles.apply(lyr, self.parcel_types)
@@ -331,6 +369,17 @@ class Fabric:
 
     def _configure_layers(self):
         """Default values and form widgets (dropdowns) for every layer."""
+        added = []
+        for role in (S.ROLE_PARCELS, S.ROLE_RECORDS):
+            try:
+                names = S.add_missing_fields(self.layers[role], role)
+            except Exception as e:
+                from qgis.core import QgsMessageLog
+                QgsMessageLog.logMessage("Could not add %s fields: %s" % (role, e), "Parcel Fabric",
+                                         Qgis.MessageLevel.Warning)
+                names = []
+            if role == S.ROLE_PARCELS:
+                added = names
         guid_default = QgsDefaultValue("upper(uuid())")
         rec_default = QgsDefaultValue("@%s" % ACTIVE_RECORD_VAR)
         rec_rel = QgsEditorWidgetSetup("ValueRelation", {
@@ -372,6 +421,14 @@ class Fabric:
             setw("RecordedDate", QgsEditorWidgetSetup("DateTime", {
                 "field_format": "yyyy-MM-dd", "display_format": "yyyy-MM-dd",
                 "calendar_popup": True, "allow_null": True}))
+        if added:
+            try:
+                from . import styles
+                styles.apply(self.parcels, self.parcel_types)
+            except Exception as e:
+                from qgis.core import QgsMessageLog
+                QgsMessageLog.logMessage("Could not restyle parcels: %s" % e, "Parcel Fabric",
+                                         Qgis.MessageLevel.Warning)
 
     def set_show_only_current(self, on):
         """Hide retired features (sets a layer filter)."""
@@ -421,14 +478,14 @@ class Fabric:
         return out
 
     def create_record(self, name, rtype="", date=None, book="", page="", doc_url="", basis="",
-                      notes="", scale=1.0, rotation=0.0):
+                      notes="", scale=1.0, rotation=0.0, parcel_id=""):
         lyr = self.records
         f = QgsFeature(lyr.fields())
         gid = S.new_guid()
         vals = {"GlobalID": gid, "ParcelCount": 0}
         vals.update({RECORD_MAP[k]: v for k, v in dict(
-            name=name, rtype=rtype, date=date, book=book, page=page, doc_url=doc_url,
-            basis=basis, notes=notes, scale=scale, rotation=rotation).items()})
+            name=name, rtype=rtype, date=date, book=book, page=page, parcel_id=parcel_id,
+            doc_url=doc_url, basis=basis, notes=notes, scale=scale, rotation=rotation).items()})
         for k, v in vals.items():
             i = lyr.fields().indexOf(k)
             if i >= 0:
@@ -588,7 +645,7 @@ class Fabric:
         return len(feats), len(new_pts)
 
 
-def _sibling_table(layer, table, fabric):
+def _sibling_table(layer, role, fabric):
     """Open (creating if needed) another table in the same database as ``layer``."""
     reg = QgsProviderRegistry.instance()
     prov = layer.providerType()
@@ -599,8 +656,10 @@ def _sibling_table(layer, table, fabric):
     else:
         conn = reg.providerMetadata(prov).createConnection(layer.source(), {})
         schema = parts.get("schema", "") or ""
-    S.ensure_table(conn, schema, fabric.settings.get("prefix", ""), S.ROLE_LINEAGE, layer.crs())
-    return S.load_table(conn, prov, schema, table, LAYER_LABELS[S.ROLE_LINEAGE])
+    table = S.table_name(fabric.settings.get("prefix", ""), role)
+    S.ensure_table(conn, schema, fabric.settings.get("prefix", ""), role, layer.crs(),
+                   prov in S.MULTIPART_PROVIDERS)
+    return S.load_table(conn, prov, schema, table, LAYER_LABELS[role])
 
 
 class EditSession:

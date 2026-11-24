@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 """Assign Parcel Numbers to the selected parcels.
 
-Two cases:
+Three cases:
   * New parcels - the next unused ParcelID in each parcel's
     section-township-range, split 000.
   * Splits of a parent - the parent's number with the next -001, -002...;
     optionally the parent is retired by the active record.
+  * Type each roll ID - stored as typed. Strap parts are filled only when
+    the text is a section-township-range number.
 """
 
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QTableWidget,
@@ -34,12 +37,20 @@ class NumbersDialog(QDialog):
 
         self.rb_new = QRadioButton("New parcels - next unused ID in each parcel's section-township-range")
         self.rb_split = QRadioButton("Splits of a parent parcel")
+        self.rb_type = QRadioButton("Type each parcel's roll ID")
         grp = QButtonGroup(self)
         grp.addButton(self.rb_new)
         grp.addButton(self.rb_split)
+        grp.addButton(self.rb_type)
         self.rb_new.setChecked(True)
         lay.addWidget(self.rb_new)
         lay.addWidget(self.rb_split)
+        lay.addWidget(self.rb_type)
+        self.type_hint = QLabel("Type the roll's parcel ID in the last column. It does not have to be a "
+                                "section-township-range number.")
+        self.type_hint.setWordWrap(True)
+        self.type_hint.setStyleSheet("color: palette(mid);")
+        lay.addWidget(self.type_hint)
         prow = QHBoxLayout()
         prow.addSpacing(24)
         prow.addWidget(QLabel("Parent number"))
@@ -74,7 +85,7 @@ class NumbersDialog(QDialog):
         self.bb.rejected.connect(self.reject)
         lay.addWidget(self.bb)
 
-        for w in (self.rb_new, self.rb_split):
+        for w in (self.rb_new, self.rb_split, self.rb_type):
             w.toggled.connect(self._sync)
         self.parent_num.textChanged.connect(self._sync)
         self.fabric.parcels.selectionChanged.connect(self._sync)
@@ -97,13 +108,19 @@ class NumbersDialog(QDialog):
         self.sel_lbl.setText("<b>%d parcel(s) selected</b> in the Parcels layer. Select the parcels "
                              "to number with the Select tool, then Preview." % len(sel))
         split = self.rb_split.isChecked()
+        typed = self.rb_type.isChecked()
         self.parent_num.setEnabled(split)
         self.retire.setEnabled(split)
+        self.type_hint.setVisible(typed)
+        triggers = (QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed
+                    | QAbstractItemView.EditTrigger.AnyKeyPressed) if typed else \
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        self.table.setEditTriggers(triggers)
         self.parent_lbl.setText("")
         if split and self.parent_num.text().strip():
             p = N.parse_number(self.parent_num.text())
             if p is None:
-                self.parent_lbl.setText("Not a parcel number like 12-4S-16-02942-000")
+                self.parent_lbl.setText("Not a section-township-range number. Type each child's roll ID instead.")
             else:
                 f = PN.find_parcel(self.fabric, self.parent_num.text().strip())
                 if f is None:
@@ -136,7 +153,9 @@ class NumbersDialog(QDialog):
         parent = self.parent_num.text().strip()
         if self.rb_split.isChecked():
             if N.parse_number(parent) is None:
-                raise ValueError("Enter the parent's number, like 12-4S-16-02942-000.")
+                raise ValueError("Enter the parent's number, like 12-4S-16-02942-000. "
+                                 "If the parent is a roll ID, choose 'Type each parcel's roll ID' "
+                                 "and type the children's numbers.")
             if any(f["ParcelNumber"] == parent for f in sel):
                 raise ValueError("The parent is in the selection - select only the new parcels.")
             before = {f.id(): f["ParcelNumber"] for f in sel}
@@ -149,6 +168,9 @@ class NumbersDialog(QDialog):
         return [(f, before[f.id()]) for f in sel]
 
     def _preview(self):
+        if self.rb_type.isChecked():
+            self._preview_typed()
+            return
         try:
             self._planned = self._plan()
         except (ValueError, PN.NumberingNotSetUp, N.NumberError) as e:
@@ -162,7 +184,94 @@ class NumbersDialog(QDialog):
             for c, v in enumerate([f["Name"] or "#%d" % f.id(), before or "", f["ParcelNumber"]]):
                 self.table.setItem(r, c, QTableWidgetItem(str(v)))
 
+    def _lock(self, item):
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        return item
+
+    def _preview_typed(self):
+        sel = self._selected()
+        if not sel:
+            self._planned = []
+            QMessageBox.warning(self, "Assign Parcel Numbers", "Select the parcels to number first.")
+            return
+        if not self.overwrite.isChecked():
+            sel = [f for f in sel if not f["ParcelNumber"]]
+            if not sel:
+                self._planned = []
+                QMessageBox.warning(self, "Assign Parcel Numbers",
+                                    "All selected parcels already have numbers "
+                                    "(tick 'Replace numbers' to renumber them).")
+                return
+        self.table.setRowCount(0)
+        for f in sorted(sel, key=lambda f: f.id()):
+            r = self.table.rowCount()
+            self.table.insertRow(r)
+            name = self._lock(QTableWidgetItem(str(f["Name"] or "#%d" % f.id())))
+            name.setData(Qt.ItemDataRole.UserRole, f.id())
+            now = self._lock(QTableWidgetItem(str(f["ParcelNumber"] or "")))
+            self.table.setItem(r, 0, name)
+            self.table.setItem(r, 1, now)
+            self.table.setItem(r, 2, QTableWidgetItem(str(f["ParcelNumber"] or "")))
+        self._planned = [1]
+
+    def _apply_typed(self):
+        if self.table.rowCount() == 0:
+            self._preview_typed()
+            if self.table.rowCount() == 0:
+                return
+        lyr = self.fabric.parcels
+        rows = []
+        seen = []
+        for r in range(self.table.rowCount()):
+            name = self.table.item(r, 0)
+            new = self.table.item(r, 2)
+            fid = name.data(Qt.ItemDataRole.UserRole) if name else None
+            text = new.text().strip() if new else ""
+            try:
+                fields = N.fields_for(text)
+            except N.NumberError as e:
+                QMessageBox.warning(self, "Assign Parcel Numbers", str(e))
+                return
+            if not fields["ParcelNumber"]:
+                QMessageBox.warning(self, "Assign Parcel Numbers",
+                                    "Type a roll ID in the New number column for every parcel.")
+                return
+            if fields["ParcelNumber"] in seen:
+                QMessageBox.warning(self, "Assign Parcel Numbers",
+                                    "Parcel number %s is entered twice." % fields["ParcelNumber"])
+                return
+            seen.append(fields["ParcelNumber"])
+            rows.append((fid, fields))
+        used = set(PN.used_numbers(self.fabric))
+        for fid, _fields in rows:
+            feat = lyr.getFeature(fid)
+            old = str(feat["ParcelNumber"] or "") if feat.isValid() else ""
+            if old:
+                used.discard(old)
+        for _fid, fields in rows:
+            if fields["ParcelNumber"] in used:
+                QMessageBox.warning(self, "Assign Parcel Numbers",
+                                    "%s is already used by another parcel." % fields["ParcelNumber"])
+                return
+            used.add(fields["ParcelNumber"])
+        try:
+            with EditSession([lyr], "Assign parcel numbers") as ed:
+                for fid, fields in rows:
+                    for k, v in fields.items():
+                        ed.change(lyr, fid, k, v)
+        except Exception as e:
+            QMessageBox.critical(self, "Assign Parcel Numbers", str(e))
+            return
+        self.iface.messageBar().pushSuccess("Parcel Fabric", "Numbered %d parcel(s)." % len(rows))
+        self.iface.mapCanvas().refresh()
+        self._planned = []
+        self.table.setRowCount(0)
+        lyr.removeSelection()
+
     def _apply(self):
+        if self.rb_type.isChecked():
+            self._apply_typed()
+            return
         if not self._planned:
             self._preview()
             if not self._planned:

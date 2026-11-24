@@ -529,9 +529,14 @@ def _match(parcel_lyr, face, pos, tol, current):
     req = QgsFeatureRequest().setFilterRect(face.boundingBox()).setFilterExpression(current)
     seed = same = overlap = None
     fa = face.area()
+    stack_i = parcel_lyr.fields().indexOf("QPF_Stack")
     for f in parcel_lyr.getFeatures(req):
         g = f.geometry()
         if g.isNull():
+            continue
+        # A condo or common-area copy sits on the land parcel. Rebuilding the land
+        # parcel must not adopt that copy or warn that it overlaps.
+        if stack_i >= 0 and f[stack_i]:
             continue
         if f["IsSeed"] == 1:
             if face.contains(g.pointOnSurface()):

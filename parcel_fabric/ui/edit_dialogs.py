@@ -483,6 +483,20 @@ class SubdivideWindow(_EditWindow):
         frow.addWidget(self.frontage, 1)
         frow.addWidget(pick)
         form.addRow("Frontage runs", frow)
+        srow = QHBoxLayout()
+        self.subdiv = QLineEdit()
+        self.subdiv.setPlaceholderText("Subdivision name")
+        self.block = QLineEdit()
+        self.block.setPlaceholderText("Block")
+        self.lot_start = QSpinBox()
+        self.lot_start.setRange(1, 9999)
+        self.lot_start.setValue(1)
+        srow.addWidget(self.subdiv, 2)
+        srow.addWidget(QLabel("Block"))
+        srow.addWidget(self.block)
+        srow.addWidget(QLabel("First lot"))
+        srow.addWidget(self.lot_start)
+        form.addRow("Subdivision", srow)
         lrow = QHBoxLayout()
         self.by_width = QRadioButton("Lots")
         self.by_count = QRadioButton("or")
@@ -588,28 +602,38 @@ class SubdivideWindow(_EditWindow):
         min_a = (self._num(self.min_area) or 0) * self.min_unit.currentData()
         min_f = self._num(self.min_front) or 0
         rows, bad = [], 0
-        for i, g in enumerate(sorted(pieces, key=lambda g: (-round(g.centroid().asPoint().y(), 1),
-                                                            round(g.centroid().asPoint().x(), 1))), 1):
+        start = self.lot_start.value()
+        ordered = sorted(pieces, key=lambda g: (-round(g.centroid().asPoint().y(), 1),
+                                                 round(g.centroid().asPoint().x(), 1)))
+        for i, g in enumerate(ordered):
             r = QgsGeometry(g)
             r.rotate(-math.degrees(front) + 90, g.centroid().asPoint())   # frontage now runs east-west
-            width = r.boundingBox().width()
+            width, depth = r.boundingBox().width(), r.boundingBox().height()
             fails = []
             if min_a and g.area() < min_a:
                 fails.append("area")
             if min_f and width < min_f - 0.005:
                 fails.append("frontage")
             bad += bool(fails)
-            rows.append("<tr><td>%d</td><td>%.3f</td><td>%.1f</td><td style='color:%s'>%s</td></tr>" % (
-                i, g.area() / 43560.0, width, "#b3261e" if fails else "#1b5e20",
+            rows.append("<tr><td>%d</td><td>%.3f</td><td>%.1f x %.1f</td><td style='color:%s'>%s</td></tr>" % (
+                start + i, g.area() / 43560.0, width, depth, "#b3261e" if fails else "#1b5e20",
                 ("too small: " + ", ".join(fails)) if fails else "ok"))
-        self.prev_lbl.setText("<b>%d lots</b>%s<table><tr><th>Lot</th><th>Acres</th><th>Frontage ft</th>"
+        self.prev_lbl.setText("<b>%d lots</b>%s<table><tr><th>Lot</th><th>Acres</th><th>Width x depth</th>"
                               "<th>Zoning</th></tr>%s</table>" % (
                                   len(pieces), " - <span style='color:#b3261e'>%d fail zoning</span>" % bad
                                   if bad else "", "".join(rows)))
 
     def apply(self, fab, record):
-        parent, cuts, _front = self._compute()
-        return E.cut_parcel(fab, parent, cuts, record, "Subdivide")
+        parent, cuts, front = self._compute()
+        res = E.cut_parcel(fab, parent, cuts, record, "Subdivide")
+        try:
+            n = E.stamp_lots(fab, parent["GlobalID"], self.subdiv.text().strip(), self.block.text().strip(),
+                             self.lot_start.value(), front)
+            if n:
+                res.messages.append("lots %d-%d" % (self.lot_start.value(), self.lot_start.value() + n - 1))
+        except Exception as e:
+            res.messages.append("lots were cut but not labeled: %s" % e)
+        return res
 
     def release_tools(self):
         if self.canvas.mapTool() is self.pick_tool:

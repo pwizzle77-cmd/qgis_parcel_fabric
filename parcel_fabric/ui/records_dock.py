@@ -59,8 +59,9 @@ class RecordsDock(QDockWidget):
         find.addWidget(self.unmapped)
         lay.addLayout(find)
 
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Name", "Type", "Book", "Page", "Recorded", "Parcels"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Name", "Type", "Book", "Page", "Parcel ID", "Recorded", "Parcels"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -72,7 +73,7 @@ class RecordsDock(QDockWidget):
 
         for row in [
             [("New Record...", self._new_record, "Create a record for a plat, deed or survey"),
-             ("Edit...", self._edit_record, "Correct the record's name, type, book, page, document..."),
+             ("Edit...", self._edit_record, "Correct the record's name, type, book, page, parcel id, document..."),
              ("Set Active", self._activate, "New lines and parcels will belong to this record")],
             [("Zoom To", self._zoom, "Zoom to the record's parcels"),
              ("Document", self._open_doc, "Open the record's scanned document"),
@@ -175,11 +176,13 @@ class RecordsDock(QDockWidget):
                 name.setFont(fnt)
             d = f["RecordedDate"]
             dtxt = d.toString("yyyy-MM-dd") if hasattr(d, "toString") and d else ""
+            pid = f["QPF_ParcelID"] if f.fields().indexOf("QPF_ParcelID") >= 0 else ""
             cnt = QTableWidgetItem()
             cnt.setData(Qt.ItemDataRole.DisplayRole, int(f["ParcelCount"] or 0))
             for c, it in enumerate([name, QTableWidgetItem(str(f["RecordType"] or "")),
                                     QTableWidgetItem(str(f["Book"] or "")),
                                     QTableWidgetItem(str(f["Page"] or "")),
+                                    QTableWidgetItem(str(pid or "")),
                                     QTableWidgetItem(dtxt), cnt]):
                 self.table.setItem(r, c, it)
         self.table.setSortingEnabled(True)
@@ -198,7 +201,7 @@ class RecordsDock(QDockWidget):
             self.table.setRowHidden(r, not hit)
 
     def _parcel_count(self, row):
-        item = self.table.item(row, 5)
+        item = self.table.item(row, 6)
         if item is None:
             return 0
         try:

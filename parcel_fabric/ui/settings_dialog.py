@@ -14,12 +14,13 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QTabWidget, QVBoxLayout, QWidget,
+    QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..core import documents as D
 from ..core import schema as S
 from ..core.fabric import type_expr
+from ..core.numbering import NumberError, clean_pattern, number_pattern
 
 SAMPLE = D.record_values("Sunny Acres", "Plat", "5", "22", "2024-03-01", "{0A1B2C3D-0000}")
 
@@ -105,9 +106,35 @@ class SettingsDialog(QDialog):
         # ---- Parcel numbers --------------------------------------------
         n = QWidget()
         nf = QFormLayout(n)
-        intro = QLabel("Numbers look like <b>12-4S-16-02942-000</b>: section, township, range "
-                       "from the sections layer, then the next unused 5-digit ID in that "
-                       "section-township-range, then the split (000 for a new parcel).")
+        pattern = QLabel("How an existing parcel number splits. 12345-002 is stem 12345 and "
+                         "split 002 when the separator is -, the digit count is 3, and the "
+                         "parent suffix is 000. A hyphen still reads a Florida strap on its "
+                         "own last piece, such as 12-4S-16-02942-001.")
+        pattern.setWordWrap(True)
+        nf.addRow(pattern)
+        sep, digits, parent = number_pattern(s)
+        self.num_sep = QLineEdit(sep)
+        self.num_sep.setMaximumWidth(48)
+        self.num_sep.setToolTip("Between the parcel id and the split.")
+        self.num_digits = QSpinBox()
+        self.num_digits.setRange(1, 6)
+        self.num_digits.setValue(digits)
+        self.num_digits.setToolTip("The last piece is a split when it has at most this many digits.")
+        self.num_parent = QLineEdit(parent)
+        self.num_parent.setMaximumWidth(72)
+        self.num_parent.setToolTip("The original parcel ends with this. 000 matches -000.")
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Separator"))
+        row.addWidget(self.num_sep)
+        row.addWidget(QLabel("Digits"))
+        row.addWidget(self.num_digits)
+        row.addWidget(QLabel("Parent"))
+        row.addWidget(self.num_parent)
+        row.addStretch(1)
+        nf.addRow("Parcel number", row)
+        intro = QLabel("New parcels built here still look like <b>12-4S-16-02942-000</b>: "
+                       "section, township, range from the sections layer, then the next unused "
+                       "5-digit ID in that section-township-range, then the split (000 for a new parcel).")
         intro.setWordWrap(True)
         nf.addRow(intro)
         self.use_default = QCheckBox("Use the BLM National PLSS service (online; no setup needed)")
@@ -323,6 +350,12 @@ class SettingsDialog(QDialog):
             return
         num_types = [self.num_types.item(i).text() for i in range(self.num_types.count())
                      if self.num_types.item(i).checkState() == Qt.CheckState.Checked]
+        try:
+            sep, digits, parent = clean_pattern(
+                self.num_sep.text(), self.num_digits.value(), self.num_parent.text())
+        except NumberError as e:
+            QMessageBox.warning(self, "Fabric Settings", str(e))
+            return
         values = {
             "name": self.name.text().strip() or "Parcel Fabric",
             "parcel_types": json.dumps(types),
@@ -346,6 +379,9 @@ class SettingsDialog(QDialog):
             "plss_use_default": "1" if dflt else "0",
             "number_on_build": "1" if self.on_build.isChecked() else "0",
             "number_types": json.dumps(num_types if len(num_types) < len(types) else []),
+            "number_separator": sep,
+            "number_split_digits": str(digits),
+            "number_parent_suffix": parent,
         }
         try:
             self.ai.save()

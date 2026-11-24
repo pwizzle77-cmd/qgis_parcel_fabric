@@ -151,6 +151,12 @@ SUBDIVISION_FIELDS = [
     ("Name", STR, 255, "Name"),
 ]
 
+BLOCK_FIELDS = [
+    ("GlobalID", STR, GUID_LEN, "Global ID"),
+    ("Block", STR, 16, "Block"),
+    ("Subdivision", STR, 80, "Subdivision"),
+]
+
 LINEAGE_FIELDS = [
     ("GlobalID", STR, GUID_LEN, "Global ID"),
     ("RecordID", STR, GUID_LEN, "Record"),
@@ -173,7 +179,7 @@ ROLE_RECORDS, ROLE_POINTS, ROLE_CONNECTIONS, ROLE_SETTINGS = (
     "records", "points", "connections", "settings")
 ROLE_LINES, ROLE_PARCELS = "lines", "parcels"
 ROLE_LINEAGE = "lineage"
-ROLE_LOTS, ROLE_SUBDIVISIONS = "lots", "subdivisions"
+ROLE_LOTS, ROLE_BLOCKS, ROLE_SUBDIVISIONS = "lots", "blocks", "subdivisions"
 
 # BLM National PLSS CadNSDI (verified 2026-11): layer 1 = townships (TWNSHPNO, TWNSHPDIR,
 # RANGENO, RANGEDIR), layer 2 = sections (FRSTDIVNO).  Both Web Mercator; both carry PLSSID.
@@ -217,6 +223,10 @@ DEFAULT_SETTINGS = {
     "plss_use_default": "1",
     "number_on_build": "1",
     "number_types": "",           # JSON list; blank = every parcel type
+    # import split history: 12345-002 is stem 12345, split 2, parent 000
+    "number_separator": "-",
+    "number_split_digits": "3",
+    "number_parent_suffix": "000",
 }
 
 
@@ -233,7 +243,8 @@ def table_name(prefix, role):
     p = (prefix + "_") if prefix else ""
     names = {ROLE_RECORDS: "Records", ROLE_POINTS: "Points", ROLE_CONNECTIONS: "Connections",
              ROLE_SETTINGS: "QPF_Settings", ROLE_PARCELS: "Parcels", ROLE_LINES: "Parcel_Lines",
-             ROLE_LINEAGE: "Parcel_Lineage", ROLE_LOTS: "Lots", ROLE_SUBDIVISIONS: "Subdivisions"}
+             ROLE_LINEAGE: "Parcel_Lineage", ROLE_LOTS: "Lots", ROLE_BLOCKS: "Blocks",
+             ROLE_SUBDIVISIONS: "Subdivisions"}
     return p + names[role]
 
 
@@ -254,6 +265,8 @@ def table_specs(prefix, multipart=True):
         (ROLE_LINES, table_name(prefix, ROLE_LINES), W.CompoundCurve, LINE_FIELDS),
         (ROLE_LOTS, table_name(prefix, ROLE_LOTS),
          W.MultiSurface if multipart else W.CurvePolygon, LOT_FIELDS),
+        (ROLE_BLOCKS, table_name(prefix, ROLE_BLOCKS),
+         W.MultiSurface if multipart else W.CurvePolygon, BLOCK_FIELDS),
         (ROLE_SUBDIVISIONS, table_name(prefix, ROLE_SUBDIVISIONS),
          W.MultiSurface if multipart else W.CurvePolygon, SUBDIVISION_FIELDS),
         (ROLE_LINEAGE, table_name(prefix, ROLE_LINEAGE), W.NoGeometry, LINEAGE_FIELDS),
@@ -264,7 +277,8 @@ def fields_for(role):
     return {ROLE_SETTINGS: SETTINGS_FIELDS, ROLE_RECORDS: RECORD_FIELDS, ROLE_POINTS: POINT_FIELDS,
             ROLE_CONNECTIONS: LINE_FIELDS, ROLE_PARCELS: PARCEL_FIELDS,
             ROLE_LINES: LINE_FIELDS, ROLE_LINEAGE: LINEAGE_FIELDS,
-            ROLE_LOTS: LOT_FIELDS, ROLE_SUBDIVISIONS: SUBDIVISION_FIELDS}[role]
+            ROLE_LOTS: LOT_FIELDS, ROLE_BLOCKS: BLOCK_FIELDS,
+            ROLE_SUBDIVISIONS: SUBDIVISION_FIELDS}[role]
 
 
 def ensure_table(conn, schema, prefix, role, crs, multipart=True):

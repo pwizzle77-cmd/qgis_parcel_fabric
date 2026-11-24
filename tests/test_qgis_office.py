@@ -339,6 +339,15 @@ class OfficeTests(_Base):
         self.assertTrue(spun_rows["66-001"]["RetiredByRecord"])
         self.assertEqual(spun_rows["66-002"]["ParentNumber"], "66-001")
 
+        wide = layer("wide")
+        wide.dataProvider().addFeatures([
+            feat(wide, 0, "1234567-0000", "2000-01-01", 300),
+            feat(wide, 1, "1234567-0001", "2004-01-01", 300)])
+        four = X.import_parcel_layer(
+            self.fab, wide, "Tax", None, "PIN", "DEEDDATE", True, "0", "-", 4)
+        self.assertEqual(four["history_linked"], 1)
+        self.assertEqual(four["history_retired"], 1)
+
     def test_import_lots_and_subdivisions(self):
         from qgis.PyQt.QtCore import QVariant
         from qgis.core import QgsField
@@ -380,6 +389,26 @@ class OfficeTests(_Base):
         sub_out = X.import_subdivisions(self.fab, subs, "NAME")
         self.assertEqual(sub_out["copied"], 1)
         self.assertEqual([f["Name"] for f in self.fab.subdivisions.getFeatures()], ["OAKS"])
+
+        blocks = QgsVectorLayer("Polygon?crs=epsg:2238", "blocks", "memory")
+        blocks.dataProvider().addAttributes([
+            QgsField("BLOCK", QVariant.String), QgsField("SUBDIVISION", QVariant.String)])
+        blocks.updateFields()
+        blk = QgsFeature(blocks.fields())
+        blk.setGeometry(box(X0, Y0, X0 + 200, Y0 + 200))
+        blk.setAttribute("BLOCK", "2")
+        blk.setAttribute("SUBDIVISION", "OAKS")
+        blocks.dataProvider().addFeatures([blk])
+        lines_before = sum(1 for _ in self.fab.lines.getFeatures())
+        block_out = X.import_blocks(self.fab, blocks, "BLOCK", "SUBDIVISION")
+        self.assertEqual(block_out["copied"], 1)
+        saved_blocks = list(self.fab.blocks.getFeatures())
+        self.assertEqual([(f["Block"], f["Subdivision"]) for f in saved_blocks], [("2", "OAKS")])
+        again_blocks = X.import_blocks(self.fab, blocks, "BLOCK", "SUBDIVISION")
+        self.assertEqual(again_blocks["copied"], 0)
+        self.assertEqual(again_blocks["skipped"]["same"], 1)
+        self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures()), before)
+        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), lines_before)
 
     def test_curved_multipolygon_imports(self):
         import os

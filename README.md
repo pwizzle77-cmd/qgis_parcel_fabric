@@ -89,6 +89,10 @@ Targets QGIS 3.40+ and Qt 5/6 (QGIS 4.x).
    `Township` 4S, `Range` 16, `ParcelID` `02942-000`, `ParcelSeq` 2942 and `SplitNo` 0.
    **Type each parcel's roll ID** stores the county's own parcel ID as typed
    (up to 30 characters) and clears those strap parts.
+   **Fabric Settings > Parcel numbers** sets how an existing number splits on import:
+   the separator, how many trailing digits count as the split, and the parent suffix.
+   The same three boxes are on Import / Export > Parcel layer. Defaults are `-`, 3 digits,
+   and parent `000`, so `12345-002` and a Florida strap keep working.
 7. **Check Fabric** – open loops, lines without COGO, line ends without points,
    poor misclose, stated vs calculated area over 1%, unbuilt seeds, features with
    no record, overlaps, and gaps wider than the snap tolerance but still a sliver
@@ -288,8 +292,10 @@ says so.
   office that was not keeping a fabric. Choose what to import:
   - **Parcels** – each parcel id becomes its own record. The record name and parcel id
     are that number, and book and page stay blank. Map a date field onto the recorded
-    date. **Build split history** links `-001`, `-002` and so on to the parent suffix
-    (default `000`) and retires that parent only when a child has a later date. A parcel
+    date. **Build split history** uses the parcel number on that page (separator, digit
+    count, and parent suffix; also under Fabric Settings > Parcel numbers). The default
+    links `-001`, `-002` and so on to parent `000` and retires that parent only when a
+    child has a later date. A parcel
     with no number shares one record named "Existing parcels". Or tick **Use the active
     record** to file the whole layer under one record. A text field keeps leading zeros.
     A strap still fills section, township and range. Any other id is stored as typed.
@@ -301,6 +307,8 @@ says so.
   - **Lots** – lot polygons go in the Lots table (lot, subdivision, block, and the tax
     parcel number). Tax parcels stay in Parcels. A lot drawn with Subdivide Block stays
     in Parcels.
+  - **Blocks** – subdivision block polygons go in the Blocks table (block and subdivision).
+    Tax parcels stay in Parcels. A lot drawn with Subdivide Block stays in Parcels.
   - **Subdivisions** – subdivision polygons go in the Subdivisions table.
   Later deeds are traversed on top of this map. A record can be filed with a parcel id
   and no book or page. On a Florida strap the parcel number and the tax roll id are the

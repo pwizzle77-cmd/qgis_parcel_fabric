@@ -50,6 +50,12 @@ def test_split_parts_reads_the_suffix():
     assert N.split_parts("12345-002") == ("12345", 2)
     assert N.split_parts("12345") is None
     assert N.split_parts("1234567-1234") is None
+    assert N.split_parts("1234567-1234", digits=4) == ("1234567", 1234)
+    assert N.split_parts("12-4S-16-02942-001", digits=2) == ("12-4S-16-02942", 1)
+    assert N.split_parts("12345/002", separator="/") == ("12345", 2)
+    assert N.split_parts("12-4S-16-02942-001", separator="/") is None
+    assert N.split_parts("12345.002", separator=".") == ("12345", 2)
+    assert N.number_pattern({}) == ("-", 3, "000")
 
 
 def test_fields_for_keeps_a_roll_id():

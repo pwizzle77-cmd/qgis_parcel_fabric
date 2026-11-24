@@ -8,12 +8,14 @@ from qgis.gui import QgsFieldComboBox, QgsMapLayerComboBox
 from qgis.PyQt.QtCore import QDate, Qt
 from qgis.PyQt.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget, QTabWidget,
+    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget, QTabWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..core import exchange as X
+from ..core import schema as S
 from ..core.fabric import PROP_FABRIC
+from ..core.numbering import NumberError, clean_pattern, number_pattern
 
 _NUMBER_FIELDS = ("PARCELNO", "PARCEL_NO", "PARCELNUM", "PARCEL_NUM", "PARCELID", "PARCEL_ID",
                   "PIN", "STRAP", "FOLIO", "PARCEL", "ParcelNumber", "NAME")
@@ -27,13 +29,16 @@ _NAME_FIELDS = ("NAME", "SUBDIVISION", "SUB_NAME", "SUBNAME", "SUBDIV")
 _LAYER_INFO = {
     "Parcels": "Each parcel id becomes its own record. The record name and parcel id are that "
                "number, and book and page stay blank. Map a date field onto the recorded date. "
-               "Split history links -001, -002 and so on to the parent suffix, and retires the "
-               "parent only when a child has a later date. Leave it off when the suffix is not a "
-               "split. No boundary lines are created. The same outline is imported once. A text "
+               "Split history uses the parcel number below: separator, how many trailing digits "
+               "count as the split, and the parent suffix. It retires the parent only when a "
+               "child has a later date. Leave it off when the suffix is not a split. No boundary "
+               "lines are created. The same outline is imported once. A text "
                "field keeps leading zeros. A multi-polygon parcel keeps every part, and true "
                "curves stay curves.",
     "Lots": "Copies lot polygons into the Lots table. Tax parcels stay in Parcels. A lot drawn "
             "with Subdivide Block stays in Parcels.",
+    "Blocks": "Copies subdivision block polygons into the Blocks table. Tax parcels stay in "
+              "Parcels. A lot drawn with Subdivide Block stays in Parcels.",
     "Subdivisions": "Copies subdivision polygons into the Subdivisions table.",
 }
 
@@ -121,7 +126,7 @@ class ExchangeDialog(QDialog):
         form.addRow("Layer on the map", self.src_layer)
         form.addRow("Or a file", _file_row(self.src_file, self._pick_parcel_file))
         self.target = QComboBox()
-        self.target.addItems(["Parcels", "Lots", "Subdivisions"])
+        self.target.addItems(["Parcels", "Lots", "Blocks", "Subdivisions"])
         self.target.currentTextChanged.connect(self._target_changed)
         form.addRow("Import into", self.target)
         lay.addLayout(form)
@@ -132,14 +137,18 @@ class ExchangeDialog(QDialog):
         self.lot_block_field = _field_box()
         self.lot_parcel_field = _field_box()
         self.sub_name_field = _field_box()
+        self.block_field = _field_box()
+        self.block_sub_field = _field_box()
         self._field_boxes = (
             (self.num_field, _NUMBER_FIELDS), (self.date_field, _DATE_FIELDS),
             (self.lot_field, _LOT_FIELDS), (self.lot_sub_field, _SUB_FIELDS),
             (self.lot_block_field, _BLOCK_FIELDS), (self.lot_parcel_field, _NUMBER_FIELDS),
-            (self.sub_name_field, _NAME_FIELDS))
+            (self.sub_name_field, _NAME_FIELDS),
+            (self.block_field, _BLOCK_FIELDS), (self.block_sub_field, _SUB_FIELDS))
         self.stack = QStackedWidget()
         self.stack.addWidget(self._parcel_page())
         self.stack.addWidget(self._lots_page())
+        self.stack.addWidget(self._blocks_page())
         self.stack.addWidget(self._sub_page())
         lay.addWidget(self.stack)
         b = QPushButton("Import")
@@ -160,24 +169,37 @@ class ExchangeDialog(QDialog):
         self.use_active = QCheckBox("Use the active record instead of one record per parcel id")
         self.use_active.setEnabled(bool(self.manager.active_record_id))
         self.use_active.setToolTip("File every polygon under the active record. The date field is not used.")
-        self.history = QCheckBox("Build split history (-001, -002)")
+        self.history = QCheckBox("Build split history")
         self.history.setChecked(True)
-        self.history.setToolTip("Link each suffix to the parent suffix. The parent is retired only "
+        self.history.setToolTip("Link each split to the parent. The parent is retired only "
                                 "when a child has a later recorded date.")
-        self.parent_suffix = QLineEdit("000")
-        self.parent_suffix.setMaximumWidth(80)
-        self.parent_suffix.setToolTip("The original parcel ends with this. 000 matches -000.")
-        self.history.toggled.connect(self.parent_suffix.setEnabled)
-        suf = QHBoxLayout()
-        suf.addWidget(QLabel("Parent suffix"))
-        suf.addWidget(self.parent_suffix)
-        suf.addStretch(1)
+        sep, digits, parent = number_pattern(self.fab.settings if self.fab is not None else {})
+        self.num_sep = QLineEdit(sep)
+        self.num_sep.setMaximumWidth(48)
+        self.num_sep.setToolTip("Between the parcel id and the split. A hyphen matches 12345-002 "
+                                "and a Florida strap such as 12-4S-16-02942-001.")
+        self.num_digits = QSpinBox()
+        self.num_digits.setRange(1, 6)
+        self.num_digits.setValue(digits)
+        self.num_digits.setToolTip("The last piece is a split when it has at most this many digits. "
+                                   "3 means -002 is a split and -1234 is still part of the number.")
+        self.num_parent = QLineEdit(parent)
+        self.num_parent.setMaximumWidth(72)
+        self.num_parent.setToolTip("The original parcel ends with this. 000 matches -000.")
+        pattern = QHBoxLayout()
+        pattern.addWidget(QLabel("Separator"))
+        pattern.addWidget(self.num_sep)
+        pattern.addWidget(QLabel("Digits"))
+        pattern.addWidget(self.num_digits)
+        pattern.addWidget(QLabel("Parent"))
+        pattern.addWidget(self.num_parent)
+        pattern.addStretch(1)
         f.addRow("Parcel number field", self.num_field)
         f.addRow("Date field", self.date_field)
         f.addRow("Parcel type", self.layer_type)
+        f.addRow("Parcel number", pattern)
         f.addRow("", self.use_active)
         f.addRow("", self.history)
-        f.addRow("", suf)
         return w
 
     def _lots_page(self):
@@ -189,6 +211,13 @@ class ExchangeDialog(QDialog):
         f.addRow("Parcel number field", self.lot_parcel_field)
         return w
 
+    def _blocks_page(self):
+        w = QWidget()
+        f = QFormLayout(w)
+        f.addRow("Block field", self.block_field)
+        f.addRow("Subdivision field", self.block_sub_field)
+        return w
+
     def _sub_page(self):
         w = QWidget()
         f = QFormLayout(w)
@@ -196,7 +225,7 @@ class ExchangeDialog(QDialog):
         return w
 
     def _target_changed(self, name):
-        names = ["Parcels", "Lots", "Subdivisions"]
+        names = ["Parcels", "Lots", "Blocks", "Subdivisions"]
         self.stack.setCurrentIndex(names.index(name) if name in names else 0)
         self.layer_info.setText(_LAYER_INFO.get(name, _LAYER_INFO["Parcels"]))
 
@@ -240,6 +269,10 @@ class ExchangeDialog(QDialog):
                                        self.lot_block_field.currentField(),
                                        self.lot_parcel_field.currentField())
                 label = "lots"
+            elif kind == "Blocks":
+                result = X.import_blocks(self.fab, src, self.block_field.currentField(),
+                                         self.block_sub_field.currentField())
+                label = "blocks"
             elif kind == "Subdivisions":
                 result = X.import_subdivisions(self.fab, src, self.sub_name_field.currentField())
                 label = "subdivisions"
@@ -251,11 +284,23 @@ class ExchangeDialog(QDialog):
                         QMessageBox.warning(self, self.windowTitle(),
                                             "Set an active record first, or leave that box off.")
                         return
+                try:
+                    sep, digits, parent = clean_pattern(
+                        self.num_sep.text(), self.num_digits.value(), self.num_parent.text())
+                except NumberError as e:
+                    QMessageBox.warning(self, self.windowTitle(), str(e))
+                    return
+                S.write_settings(self.fab.layers[S.ROLE_SETTINGS], {
+                    "number_separator": sep, "number_split_digits": str(digits),
+                    "number_parent_suffix": parent})
+                self.fab.settings.update({
+                    "number_separator": sep, "number_split_digits": str(digits),
+                    "number_parent_suffix": parent})
                 result = X.import_parcel_layer(
                     self.fab, src, self.layer_type.currentText(), rid,
                     self.num_field.currentField() or None,
                     self.date_field.currentField() or None,
-                    self.history.isChecked(), self.parent_suffix.text())
+                    self.history.isChecked(), parent, sep, digits)
                 label = "parcels"
         except Exception as e:
             QMessageBox.critical(self, self.windowTitle(), "Import failed: %s" % e)

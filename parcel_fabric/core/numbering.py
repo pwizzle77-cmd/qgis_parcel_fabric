@@ -86,25 +86,58 @@ def fields_for(number):
             "SplitNo": p["split"]}
 
 
-_LOOSE_SPLIT = re.compile(r"^(.*)-(\d{1,3})$")
+def number_pattern(settings):
+    """(separator, digits, parent suffix). Missing values are -, 3, 000."""
+    s = settings or {}
+    sep = str(s.get("number_separator") or "-")
+    try:
+        digits = int(str(s.get("number_split_digits") or "3").strip())
+    except ValueError:
+        digits = 3
+    if digits < 1 or digits > 6:
+        digits = 3
+    parent = s.get("number_parent_suffix")
+    parent = "000" if parent is None or str(parent).strip() == "" else str(parent).strip()
+    return sep, digits, parent
 
 
-def split_parts(number):
-    """(stem, split) when the number ends in -NNN, else None.
+def clean_pattern(separator, digits, parent):
+    """The three parcel-number boxes. Digits must be 1 to 6."""
+    sep = str(separator or "").strip() or "-"
+    try:
+        width = int(str(digits).strip())
+    except (TypeError, ValueError):
+        raise NumberError("Split digits must be a whole number from 1 to 6.")
+    if not 1 <= width <= 6:
+        raise NumberError("Split digits must be a whole number from 1 to 6.")
+    suffix = str(parent or "").strip() or "000"
+    return sep, width, suffix
 
-    A strap uses its own split: '12-4S-16-02942-001' -> ('12-4S-16-02942', 1).
-    Any other id uses the same tail: '12345-002' -> ('12345', 2). A four-digit
-    tail is not a split, so a roll id like 1234567-1234 stays one number.
+
+def split_parts(number, separator="-", digits=3):
+    """(stem, split) when the number ends in a split suffix, else None.
+
+    Defaults: '12345-002' -> ('12345', 2). A four-digit tail is not a split, so
+    1234567-1234 stays one number until digits is 4. A hyphen still reads a
+    Florida strap first: '12-4S-16-02942-001' -> ('12-4S-16-02942', 1).
+    Another separator does not.
     """
     text = "" if number is None else str(number).strip()
     if not text:
         return None
-    parsed = parse_number(text)
-    if parsed:
-        stem = format_number(parsed["section"], parsed["township"], parsed["twp_dir"],
-                             parsed["range"], parsed["pid"], 0).rsplit("-", 1)[0]
-        return stem, parsed["split"]
-    match = _LOOSE_SPLIT.match(text)
+    sep = separator if separator else "-"
+    try:
+        width = int(digits)
+    except (TypeError, ValueError):
+        width = 3
+    width = 1 if width < 1 else 6 if width > 6 else width
+    if sep == "-":
+        parsed = parse_number(text)
+        if parsed:
+            stem = format_number(parsed["section"], parsed["township"], parsed["twp_dir"],
+                                 parsed["range"], parsed["pid"], 0).rsplit("-", 1)[0]
+            return stem, parsed["split"]
+    match = re.match(r"^(.*)%s(\d{1,%d})$" % (re.escape(sep), width), text)
     if not match or not match.group(1):
         return None
     return match.group(1), int(match.group(2))

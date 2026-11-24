@@ -454,7 +454,7 @@ def _stamp_footprints(fabric, record_gids):
             ed.change(fabric.records, fid, "ParcelCount", len(parts))
 
 
-def _link_splits(fabric, ptype, parent_suffix, stems):
+def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
     """Lineage from the parent suffix to the other -NNN pieces of these stems.
 
     The parent is retired only when a child record is dated later. No dates
@@ -470,7 +470,7 @@ def _link_splits(fabric, ptype, parent_suffix, stems):
     lyr = unfiltered(fabric.parcels)
     req = QgsFeatureRequest().setFilterExpression(type_expr(ptype))
     for feat in lyr.getFeatures(req):
-        parts = split_parts(feat["ParcelNumber"])
+        parts = split_parts(feat["ParcelNumber"], separator, digits)
         if parts is None or parts[0] not in stems:
             continue
         groups.setdefault(parts[0], []).append((parts[1], feat))
@@ -540,7 +540,7 @@ def _link_splits(fabric, ptype, parent_suffix, stems):
 
 
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
-                        split_history=True, parent_suffix=0):
+                        split_history=True, parent_suffix=0, separator=None, digits=None):
     """Copy polygons from ``source`` in as current parcels.
 
     With no ``record``, each parcel id is filed as its own record (name and
@@ -548,8 +548,10 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     record's recorded date. A blank number shares one "Existing parcels" record.
     Pass ``record`` to file everything under a record that already exists.
 
-    ``split_history`` links -001, -002 and so on to the parent suffix (000 unless
-    ``parent_suffix`` says otherwise). The parent is retired only when a child
+    ``split_history`` links suffixes to the parent (000 unless ``parent_suffix``
+    says otherwise). ``separator`` and ``digits`` come from fabric settings when
+    omitted: a hyphen and 3 digits read 12345-002, and a hyphen still reads a
+    Florida strap. The parent is retired only when a child
     has a later date. No lines or points are created. A strap fills the section
     fields; any other id is stored as typed. A parcel with several polygons,
     including true curves, is stored as one multi-surface. A GeoPackage that
@@ -558,7 +560,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     when the layer has more than one number on one polygon.
     """
     from qgis.core import QgsSpatialIndex, QgsWkbTypes
-    from .numbering import NumberError, fields_for, split_parts
+    from .numbering import NumberError, fields_for, number_pattern, split_parts
     from .parcel_numbers import used_numbers
 
     if record is not None and fabric.record_by_id(record) is None:
@@ -567,6 +569,11 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         S.add_missing_fields(fabric.records, S.ROLE_RECORDS)
     if not ptype:
         raise RuntimeError("Choose a parcel type.")
+    rule_sep, rule_digits, _parent = number_pattern(fabric.settings)
+    if separator is None:
+        separator = rule_sep
+    if digits is None:
+        digits = rule_digits
     if source is None or not source.isValid():
         raise RuntimeError("Choose a parcel layer.")
     if source.geometryType() != QgsWkbTypes.PolygonGeometry:
@@ -697,7 +704,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         batch.append(nf)
         if number:
             used.add(number)
-            stem = split_parts(number)
+            stem = split_parts(number, separator, digits)
             if stem:
                 stems.add(stem[0])
         remember(geom)
@@ -707,7 +714,8 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     target.reload()
     linked = retired = 0
     if split_history and stems:
-        linked, retired = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems)
+        linked, retired = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems,
+                                       separator, digits)
         target.reload()
     record_ids = [] if record else list(made)
     date_ids = []
@@ -839,6 +847,19 @@ def import_subdivisions(fabric, source, name_field=None):
     def row(feat):
         return {"GlobalID": S.new_guid(), "Name": _cut(_attr_text(feat, name_field), 255)}
     return _copy_outlines(fabric.subdivisions, source, row)
+
+
+def import_blocks(fabric, source, block_field=None, subdivision_field=None):
+    """Copy subdivision block polygons into Blocks. Tax parcels stay in Parcels.
+
+    shortcut: a lot drawn with Subdivide Block stays in Parcels. This table is
+    only the block outline.
+    """
+    def row(feat):
+        return {"GlobalID": S.new_guid(),
+                "Block": _cut(_attr_text(feat, block_field), 16),
+                "Subdivision": _cut(_attr_text(feat, subdivision_field), 80)}
+    return _copy_outlines(fabric.blocks, source, row)
 
 
 # --------------------------------------------------------------------------

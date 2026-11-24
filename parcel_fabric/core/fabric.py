@@ -45,7 +45,7 @@ LAYER_LABELS = {S.ROLE_RECORDS: "Records", S.ROLE_POINTS: "Points",
                 S.ROLE_CONNECTIONS: "Connections", S.ROLE_PARCELS: "Parcels",
                 S.ROLE_LINES: "Parcel Lines", S.ROLE_SETTINGS: "Fabric settings",
                 S.ROLE_LINEAGE: "Parcel Lineage", S.ROLE_LOTS: "Lots",
-                S.ROLE_SUBDIVISIONS: "Subdivisions"}
+                S.ROLE_BLOCKS: "Blocks", S.ROLE_SUBDIVISIONS: "Subdivisions"}
 
 # record dialog key -> Records field
 RECORD_MAP = {"name": "Name", "rtype": "RecordType", "date": "RecordedDate", "book": "Book",
@@ -96,10 +96,10 @@ class Fabric:
         layers = {S.ROLE_SETTINGS: st}
         crs = st.crs() if st.crs().isValid() else QgsCoordinateReferenceSystem(settings.get("crs", ""))
         multipart = provider in S.MULTIPART_PROVIDERS
-        for role in (S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+        for role in (S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_BLOCKS, S.ROLE_SUBDIVISIONS):
             S.ensure_table(conn, schema, prefix, role, crs, multipart)
         for role in (S.ROLE_RECORDS, S.ROLE_POINTS, S.ROLE_CONNECTIONS, S.ROLE_PARCELS, S.ROLE_LINES,
-                     S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+                     S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_BLOCKS, S.ROLE_SUBDIVISIONS):
             lyr = S.load_table(conn, provider, schema, S.table_name(prefix, role), LAYER_LABELS[role])
             if role == S.ROLE_PARCELS:
                 S.migrate_parcel_id(lyr)
@@ -136,7 +136,7 @@ class Fabric:
             for k, v in S.DEFAULT_SETTINGS.items():
                 settings.setdefault(k, v)
             fab = cls(fid, settings, layers)
-            for role in (S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+            for role in (S.ROLE_LOTS, S.ROLE_BLOCKS, S.ROLE_SUBDIVISIONS):
                 if layers.get(role) is None:
                     try:
                         fab._open_role(role)
@@ -187,6 +187,10 @@ class Fabric:
     @property
     def lots(self):
         return self._open_role(S.ROLE_LOTS)
+
+    @property
+    def blocks(self):
+        return self._open_role(S.ROLE_BLOCKS)
 
     @property
     def subdivisions(self):
@@ -242,7 +246,7 @@ class Fabric:
                 node = group.addLayer(lyr)
                 if role == S.ROLE_LINEAGE:
                     node.setItemVisibilityChecked(False)
-                elif role in (S.ROLE_LOTS, S.ROLE_SUBDIVISIONS):
+                elif role in (S.ROLE_LOTS, S.ROLE_BLOCKS, S.ROLE_SUBDIVISIONS):
                     from . import styles
                     styles.apply(lyr, self.parcel_types)
         return lyr
@@ -324,7 +328,8 @@ class Fabric:
         root = project.layerTreeRoot()
         group = root.insertGroup(0, self.name)
         for lyr in (self.points, self.lines, self.parcels, self.layers.get(S.ROLE_LOTS),
-                    self.layers.get(S.ROLE_SUBDIVISIONS), self.connections, self.records):
+                    self.layers.get(S.ROLE_BLOCKS), self.layers.get(S.ROLE_SUBDIVISIONS),
+                    self.connections, self.records):
             if lyr is None:
                 continue
             project.addMapLayer(lyr, False)

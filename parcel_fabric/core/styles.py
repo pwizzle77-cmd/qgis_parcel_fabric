@@ -52,6 +52,13 @@ def apply(lyr, parcel_types=()):
         _label(lyr, "coalesce(\"Lot\", '')", QColor("#6e3c96"))
         lyr.triggerRepaint()
         return
+    elif role == S.ROLE_BLOCKS:
+        sym = QgsFillSymbol.createSimple({"color": "200,120,40,18", "outline_color": "180,90,20",
+                                          "outline_width": "0.35"})
+        lyr.setRenderer(QgsSingleSymbolRenderer(sym))
+        _label(lyr, "coalesce(\"Block\", '')", QColor("#b45a14"))
+        lyr.triggerRepaint()
+        return
     elif role == S.ROLE_SUBDIVISIONS:
         sym = QgsFillSymbol.createSimple({"color": "40,140,80,20", "outline_color": "30,110,60",
                                           "outline_width": "0.45", "outline_style": "dash"})

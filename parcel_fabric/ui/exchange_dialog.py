@@ -28,7 +28,8 @@ _NAME_FIELDS = ("NAME", "SUBDIVISION", "SUB_NAME", "SUBNAME", "SUBDIV")
 
 _LAYER_INFO = {
     "Parcels": "Each parcel id becomes its own record. The record name and parcel id are that "
-               "number, and book and page stay blank. Map a date field onto the recorded date. "
+               "number. Book and page are optional; leave them blank when you don't have them. "
+               "Map a date field onto the recorded date. "
                "Split history uses the parcel number below: separator, how many trailing digits "
                "count as the split, and the parent suffix. It retires the parent only when a "
                "child has a later date. Leave it off when the suffix is not a split. No boundary "
@@ -168,7 +169,23 @@ class ExchangeDialog(QDialog):
             self.layer_type.addItems(self.fab.parcel_types)
         self.use_active = QCheckBox("Use the active record instead of one record per parcel id")
         self.use_active.setEnabled(bool(self.manager.active_record_id))
-        self.use_active.setToolTip("File every polygon under the active record. The date field is not used.")
+        self.use_active.setToolTip("File every polygon under the active record. The date, book, and page "
+                                   "boxes are not used.")
+        self.book = QLineEdit()
+        self.book.setPlaceholderText("optional")
+        self.book.setMaximumWidth(120)
+        self.book.setToolTip("Written on each new record. Leave blank when you don't have a book.")
+        self.page = QLineEdit()
+        self.page.setPlaceholderText("optional")
+        self.page.setMaximumWidth(120)
+        self.page.setToolTip("Written on each new record. Leave blank when you don't have a page.")
+        self.use_active.toggled.connect(self._sync_book_page)
+        book_row = QHBoxLayout()
+        book_row.addWidget(QLabel("Book"))
+        book_row.addWidget(self.book)
+        book_row.addWidget(QLabel("Page"))
+        book_row.addWidget(self.page)
+        book_row.addStretch(1)
         self.history = QCheckBox("Build split history")
         self.history.setChecked(True)
         self.history.setToolTip("Link each split to the parent. The parent is retired only "
@@ -197,6 +214,7 @@ class ExchangeDialog(QDialog):
         f.addRow("Parcel number field", self.num_field)
         f.addRow("Date field", self.date_field)
         f.addRow("Parcel type", self.layer_type)
+        f.addRow("Book and page", book_row)
         f.addRow("Parcel number", pattern)
         f.addRow("", self.use_active)
         f.addRow("", self.history)
@@ -223,6 +241,10 @@ class ExchangeDialog(QDialog):
         f = QFormLayout(w)
         f.addRow("Name field", self.sub_name_field)
         return w
+
+    def _sync_book_page(self, use_active):
+        self.book.setEnabled(not use_active)
+        self.page.setEnabled(not use_active)
 
     def _target_changed(self, name):
         names = ["Parcels", "Lots", "Blocks", "Subdivisions"]
@@ -296,11 +318,13 @@ class ExchangeDialog(QDialog):
                 self.fab.settings.update({
                     "number_separator": sep, "number_split_digits": str(digits),
                     "number_parent_suffix": parent})
+                book = "" if self.use_active.isChecked() else self.book.text().strip()
+                page = "" if self.use_active.isChecked() else self.page.text().strip()
                 result = X.import_parcel_layer(
                     self.fab, src, self.layer_type.currentText(), rid,
                     self.num_field.currentField() or None,
                     self.date_field.currentField() or None,
-                    self.history.isChecked(), parent, sep, digits)
+                    self.history.isChecked(), parent, sep, digits, book, page)
                 label = "parcels"
         except Exception as e:
             QMessageBox.critical(self, self.windowTitle(), "Import failed: %s" % e)

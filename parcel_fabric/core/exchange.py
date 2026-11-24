@@ -395,7 +395,7 @@ def _suffix_int(value):
     return number if 0 <= number <= 999 else 0
 
 
-def _record_feature(fabric, name, when, parcel_id):
+def _record_feature(fabric, name, when, parcel_id, book="", page=""):
     lyr = fabric.records
     feat = QgsFeature(lyr.fields())
     gid = S.new_guid()
@@ -405,6 +405,10 @@ def _record_feature(fabric, name, when, parcel_id):
         vals["RecordedDate"] = when
     if parcel_id and lyr.fields().indexOf("QPF_ParcelID") >= 0:
         vals["QPF_ParcelID"] = parcel_id[:30]
+    if book and lyr.fields().indexOf("Book") >= 0:
+        vals["Book"] = str(book)[:20]
+    if page and lyr.fields().indexOf("Page") >= 0:
+        vals["Page"] = str(page)[:20]
     for key, value in vals.items():
         i = lyr.fields().indexOf(key)
         if i >= 0:
@@ -540,13 +544,16 @@ def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
 
 
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
-                        split_history=True, parent_suffix=0, separator=None, digits=None):
+                        split_history=True, parent_suffix=0, separator=None, digits=None,
+                        book="", page=""):
     """Copy polygons from ``source`` in as current parcels.
 
     With no ``record``, each parcel id is filed as its own record (name and
     parcel id are that number, book and page blank). ``date_field`` is that
     record's recorded date. A blank number shares one "Existing parcels" record.
-    Pass ``record`` to file everything under a record that already exists.
+    ``book`` and ``page`` are optional and, when set, are written on each new record.
+    Pass ``record`` to file everything under a record that already exists. That path
+    leaves the record's book and page alone.
 
     ``split_history`` links suffixes to the parent (000 unless ``parent_suffix``
     says otherwise). ``separator`` and ``digits`` come from fabric settings when
@@ -631,13 +638,13 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             gid = by_number.get(number)
             if gid:
                 return gid
-            gid, recfeat = _record_feature(fabric, number, when, number)
+            gid, recfeat = _record_feature(fabric, number, when, number, book, page)
             pending.append(recfeat)
             by_number[number] = gid
             made.append(gid)
             return gid
         if blank_gid is None:
-            gid, recfeat = _record_feature(fabric, "Existing parcels", when, "")
+            gid, recfeat = _record_feature(fabric, "Existing parcels", when, "", book, page)
             pending.append(recfeat)
             blank_gid = gid
             made.append(gid)

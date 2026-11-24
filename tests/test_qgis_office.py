@@ -239,6 +239,23 @@ class OfficeTests(_Base):
         self.assertEqual(again["copied"], 0)
         self.assertEqual(self.fab.parcels.featureCount(), 3)
 
+        stamped = QgsVectorLayer("Polygon?crs=epsg:2238", "stamped", "memory")
+        stamped.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        stamped.updateFields()
+        one = QgsFeature(stamped.fields())
+        one.setGeometry(box(X0 + 800, Y0, X0 + 860, Y0 + 40))
+        one.setAttribute("PIN", "BOOKED-1")
+        stamped.dataProvider().addFeatures([one])
+        filed = X.import_parcel_layer(
+            self.fab, stamped, "Tax", number_field="PIN", split_history=False, book="5", page="22")
+        self.assertEqual(filed["records"], 1)
+        booked = [r for r in self.fab.records.getFeatures() if r["QPF_ParcelID"] == "BOOKED-1"]
+        self.assertEqual(booked[0]["Book"], "5")
+        self.assertEqual(booked[0]["Page"], "22")
+        blank = X.import_parcel_layer(
+            self.fab, stamped, "Tax", number_field="PIN", split_history=False)
+        self.assertEqual(blank["copied"], 0)
+
     def test_import_files_a_record_per_parcel_and_split_history(self):
         from qgis.PyQt.QtCore import QVariant
         from qgis.core import QgsField

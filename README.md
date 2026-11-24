@@ -291,7 +291,8 @@ says so.
 - **Parcel layer** – a shapefile, GeoPackage, or polygon layer already on the map, for an
   office that was not keeping a fabric. Choose what to import:
   - **Parcels** – each parcel id becomes its own record. The record name and parcel id
-    are that number, and book and page stay blank. Map a date field onto the recorded
+    are that number. Type a book and page when you have them; leave both blank when you
+    don't. The same book and page is written on each new record. Map a date field onto the recorded
     date. **Build split history** uses the parcel number on that page (separator, digit
     count, and parent suffix; also under Fabric Settings > Parcel numbers). The default
     links `-001`, `-002` and so on to parent `000` and retires that parent only when a

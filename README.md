@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.10.4, experimental.** Test it on a copy of real data before
+**Status: 0.10.5, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.4.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.5.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. The toolbar shows Records, Traverse, Build, Assign Parcel
    Numbers and Check Fabric, plus the active record. **More** holds the rest. The same
@@ -321,7 +321,8 @@ The window stays open. A progress bar names the layer and how many features have
 
   Every one of these imports, in any order, fills each current parcel's empty
   `Subdivision`, `Block` and `Lot`. A lot goes to the parcel with its parcel number, or else
-  to the parcel it lies in; several lots read `1-3,5`. A lot without a block takes the block
+  to the parcel it lies in; several lots read `1-3,5`. Where lots overlap, such as a platted
+  lot inside a government lot, the one that fits the parcel best counts. A lot without a block takes the block
   it lies in. The subdivision is the Subdivisions polygon holding most of the parcel, or else
   the lot's. Values you typed are kept.
 

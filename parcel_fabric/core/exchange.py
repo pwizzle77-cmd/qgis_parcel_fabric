@@ -867,8 +867,10 @@ def _write_features(layer, batch):
     return len(batch)
 
 
-def _cut(text, limit):
-    return (text or "")[:limit]
+def _cut(text, layer, field):
+    """``text`` as far as the field holds it (fabrics made before 0.10.5 have shorter ones)."""
+    length = layer.fields().field(field).length()
+    return (text or "")[:length] if length > 0 else text or ""
 
 
 def _copy_outlines(target, source, row_for, progress=None, label="features"):
@@ -985,17 +987,17 @@ def import_lots(fabric, source, lot_field=None, subdivision_field=None, block_fi
     """
     def row(feat):
         return {"GlobalID": S.new_guid(),
-                "Lot": _cut(_attr_text(feat, lot_field), 16),
-                "Block": _cut(_attr_text(feat, block_field), 16),
-                "Subdivision": _cut(_attr_text(feat, subdivision_field), 80),
-                "ParcelNumber": _cut(_attr_text(feat, parcel_field), 30)}
+                "Lot": _cut(_attr_text(feat, lot_field), fabric.lots, "Lot"),
+                "Block": _cut(_attr_text(feat, block_field), fabric.lots, "Block"),
+                "Subdivision": _cut(_attr_text(feat, subdivision_field), fabric.lots, "Subdivision"),
+                "ParcelNumber": _cut(_attr_text(feat, parcel_field), fabric.lots, "ParcelNumber")}
     return _plat_import(fabric, fabric.lots, source, row, progress, "lots")
 
 
 def import_subdivisions(fabric, source, name_field=None, progress=None):
     """Copy subdivision polygons into Subdivisions."""
     def row(feat):
-        return {"GlobalID": S.new_guid(), "Name": _cut(_attr_text(feat, name_field), 255)}
+        return {"GlobalID": S.new_guid(), "Name": _cut(_attr_text(feat, name_field), fabric.subdivisions, "Name")}
     return _plat_import(fabric, fabric.subdivisions, source, row, progress, "subdivisions")
 
 
@@ -1007,8 +1009,8 @@ def import_blocks(fabric, source, block_field=None, subdivision_field=None, prog
     """
     def row(feat):
         return {"GlobalID": S.new_guid(),
-                "Block": _cut(_attr_text(feat, block_field), 16),
-                "Subdivision": _cut(_attr_text(feat, subdivision_field), 80)}
+                "Block": _cut(_attr_text(feat, block_field), fabric.blocks, "Block"),
+                "Subdivision": _cut(_attr_text(feat, subdivision_field), fabric.blocks, "Subdivision")}
     return _plat_import(fabric, fabric.blocks, source, row, progress, "blocks")
 
 
@@ -1171,8 +1173,8 @@ def export_tax_roll(fabric, folder, county, when, since):
         QgsField("ACRES", S._mt(S.DBL)),
         QgsField("TYPE", S._mt(S.STR), len=50),
         QgsField("SUBDIV", S._mt(S.STR), len=80),
-        QgsField("BLOCK", S._mt(S.STR), len=16),
-        QgsField("LOT", S._mt(S.STR), len=16),
+        QgsField("BLOCK", S._mt(S.STR), len=64),
+        QgsField("LOT", S._mt(S.STR), len=64),
     ])
     mem.updateFields()
     feats = []
@@ -1194,7 +1196,7 @@ def export_tax_roll(fabric, folder, county, when, since):
         feat.setAttributes([
             _field_text(src, "ParcelNumber", 30), acres if acres is not None else None,
             _field_text(src, "ParcelType", 50), _field_text(src, "Subdivision", 80),
-            _field_text(src, "Block", 16), _field_text(src, "Lot", 16),
+            _field_text(src, "Block", 64), _field_text(src, "Lot", 64),
         ])
         feats.append(feat)
     if feats and not mem.dataProvider().addFeatures(feats):

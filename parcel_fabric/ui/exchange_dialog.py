@@ -395,7 +395,9 @@ class ExchangeDialog(QDialog):
         if filled:
             bits.append("Filled on parcels: %s." % ", ".join(filled))
         if plat.get("too_long"):
-            bits.append("%d lot or block lists are too long for the field and were left blank." % plat["too_long"])
+            bits.append("%d lists of lots or blocks are longer than the field and were left blank%s."
+                        % (plat["too_long"], "" if self.fab.parcels.fields().field("Lot").length() != 16
+                           else "; a new fabric has a longer field"))
         if left:
             bits.append("Left out: %s." % ", ".join(left))
         self._say(" ".join(bits))

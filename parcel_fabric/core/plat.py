@@ -82,7 +82,8 @@ def fill(fabric, progress=None):
     """Set Subdivision, Block and Lot on the current parcels.
 
     Lots go to the parcel with their parcel number, or else to the parcels they lie
-    in (or that lie in them). A lot without a block takes the block it lies in.
+    in (or that lie in them). Where lots overlap, the one that fits the parcel best counts,
+    not the government lot around it. A lot without a block takes the block it lies in.
     Returns {"Subdivision": n, "Block": n, "Lot": n, "too_long": n} parcels changed.
     """
     done = {"Subdivision": 0, "Block": 0, "Lot": 0, "too_long": 0}
@@ -120,6 +121,11 @@ def fill(fabric, progress=None):
 
     # names the Lots and Blocks layers gave: the Subdivisions layer may correct those
     spare = {_text(f["Subdivision"]) for shapes in (lots, blocks) for f, _g in shapes.items.values()} - {""}
+    room = {}
+    for field in ("Subdivision", "Block", "Lot"):
+        room[field] = parcels.fields().field(field).length()
+        if room[field] <= 0:
+            room[field] = 254       # no length set in the database
     changes = []
     for n, f in enumerate(everyone):
         if n % 500 == 0:
@@ -129,9 +135,16 @@ def fill(fabric, progress=None):
         if area <= 0:
             continue
         mine = {fid: lots.items[fid][1].area() for fid in given.get(f.id(), ())}
+        near = []
         for lot, shape, shared in lots.over(geom):
             if lot.id() not in placed and shared >= HALF * min(area, shape.area()):
-                mine[lot.id()] = shared
+                fit = shared / (area + shape.area() - shared)
+                near.append((not _text(lot["Lot"]), -fit, lot.id(), shape, shared))     # named lots first
+        kept = []
+        for _unnamed, _fit, fid, shape, shared in sorted(near, key=lambda m: m[:3]):
+            if all(_overlap(shape, other) < HALF * min(shape.area(), other.area()) for other in kept):
+                kept.append(shape)
+                mine[fid] = shared
         under = [(shared, b) for b, _g, shared in blocks.over(geom) if shared >= HALF * area]
         under = max(under, key=lambda m: m[0])[1] if under else None
         platted = [(shared, _text(s["Name"])) for s, _g, shared in subs.over(geom) if shared >= HALF * area]
@@ -153,7 +166,7 @@ def fill(fabric, progress=None):
             have = _text(f[field])
             if have and not (field == "Subdivision" and platted and have in spare):
                 continue
-            text = values[0][:80] if field == "Subdivision" else join_values(values, 16)
+            text = values[0][:room[field]] if field == "Subdivision" else join_values(values, room[field])
             if not text:
                 done["too_long"] += 1
             elif text != have:

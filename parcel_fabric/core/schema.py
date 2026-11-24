@@ -128,8 +128,8 @@ PARCEL_FIELDS = [
     ("MiscloseDistance", DBL, 0, "Misclose distance"),
     ("IsSeed", INT, 0, "Is seed"),
     ("Subdivision", STR, 80, "Subdivision"),
-    ("Block", STR, 16, "Block"),
-    ("Lot", STR, 16, "Lot"),
+    ("Block", STR, 64, "Block"),
+    ("Lot", STR, 64, "Lot"),
     ("LotWidth", DBL, 0, "Lot width"),
     ("LotDepth", DBL, 0, "Lot depth"),
     ("QPF_Stack", STR, 12, "Stacked unit (condo or common)"),
@@ -140,8 +140,8 @@ PARCEL_FIELDS = [
 
 LOT_FIELDS = [
     ("GlobalID", STR, GUID_LEN, "Global ID"),
-    ("Lot", STR, 16, "Lot"),
-    ("Block", STR, 16, "Block"),
+    ("Lot", STR, 64, "Lot"),
+    ("Block", STR, 64, "Block"),
     ("Subdivision", STR, 80, "Subdivision"),
     ("ParcelNumber", STR, 30, "Parcel number"),
 ]
@@ -153,7 +153,7 @@ SUBDIVISION_FIELDS = [
 
 BLOCK_FIELDS = [
     ("GlobalID", STR, GUID_LEN, "Global ID"),
-    ("Block", STR, 16, "Block"),
+    ("Block", STR, 64, "Block"),
     ("Subdivision", STR, 80, "Subdivision"),
 ]
 

@@ -471,7 +471,7 @@ class OfficeTests(_Base):
             ed.change(self.fab.parcels, one.id(), "Subdivision", "MY NAME")
         out = X.import_lots(self.fab, self.plat(
             "lots", ((0, 0, 300, 100), "1", "", "OAKS"),
-            *[((200 * k, 200, 200 * k + 200, 300), str(2 * k + 1), "", "OAKS") for k in range(20)]), "A", "SUB", "B", "PIN")
+            *[((100 * k, 200, 100 * k + 100, 300), str(2 * k + 1), "", "OAKS") for k in range(40)]), "A", "SUB", "B", "PIN")
         X.import_subdivisions(self.fab, self.plat("subs", ((-1, -1, 4001, 301), "OAKS PLAT")), "A")
         self.assertEqual(self.platted(), {"P-ONE": ("MY NAME", "", "TRACT 7"), "P-MANY": ("OAKS PLAT", "", "")})
         self.assertEqual(out["plat"]["too_long"], 1)
@@ -480,6 +480,20 @@ class OfficeTests(_Base):
             X.import_blocks(self.fab, self.plat("blocks", ((0, 0, 300, 100), "A")), "A", "SUB")
         self.assertEqual(self.fab.blocks.featureCount(), 0)
         self.fab.parcels.rollBack()
+
+    def test_the_best_fitting_of_overlapping_lots_counts(self):
+        X.import_parcel_layer(self.fab, self.county(
+            ((0, 0, 100, 100), "P-LOT", ""), ((100, 0, 300, 100), "P-TWO", ""), ((0, 300, 1000, 900), "P-GOVT", ""),
+            ((500, 0, 600, 100), "P-REST", "")), "Tax", None, "PIN")
+        name = "GOV'T LOT 4 SECTION 20-12S-99E"
+        out = X.import_lots(self.fab, self.plat(
+            "lots", ((0, 0, 1000, 300), name), ((0, 0, 101, 100), "23"), ((0, 0, 100, 100), "", "", "OAKS"), ((100, 0, 200, 100), "24"),
+            ((200, 0, 300, 100), "25"), ((40, 40, 60, 60), "WELL"),
+            ((0, 300, 1000, 900), "GOV'T LOT 5"), ((0, 300, 50, 350), "1")), "A", "SUB", "B", "PIN")
+        self.assertEqual({k: v[2] for k, v in self.platted().items()},
+                         {"P-LOT": "23", "P-TWO": "24,25", "P-GOVT": "GOV'T LOT 5", "P-REST": name})
+        self.assertEqual(out["plat"]["too_long"], 0)
+        self.assertIn(name, [f["Lot"] for f in self.fab.lots.getFeatures()])
 
     def test_joined_lot_numbers(self):
         from parcel_fabric.core.plat import join_values

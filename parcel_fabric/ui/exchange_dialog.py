@@ -24,25 +24,28 @@ _DATE_FIELDS = ("DEEDDATE", "DEED_DATE", "RECORDDATE", "RECORDED", "RECORD_DATE"
                 "SALE_DATE", "DOCDATE", "DOC_DATE", "DATE")
 _LOT_FIELDS = ("LOT", "LOT_NO", "LOTNO", "LOT_NUM", "LOTNUM")
 _BLOCK_FIELDS = ("BLOCK", "BLK", "BLOCK_NO", "BLOCKNO")
-_SUB_FIELDS = ("SUBDIVISION", "SUBDIV", "SUB_NAME", "SUBNAME", "SUB")
-_NAME_FIELDS = ("NAME", "SUBDIVISION", "SUB_NAME", "SUBNAME", "SUBDIV")
+_SUB_FIELDS = ("SUBDIVISION", "SUBDIVISIO", "SUBDIV", "SUB_NAME", "SUBNAME", "SUB")
+_NAME_FIELDS = ("NAME", "SUBDIVISION", "SUBDIVISIO", "SUB_NAME", "SUBNAME", "SUBDIV")
 
 _LAYER_INFO = {
     "Parcels": "Each parcel id becomes its own record. The record name and parcel id are that "
                "number. Book and page are optional; leave them blank when you don't have them. "
                "Map a date field onto the recorded date. "
                "Split history uses the parcel number below: separator, how many trailing digits "
-               "count as the split, and the parent suffix. It retires the parent only when a "
-               "child has a later date. Leave it off when the suffix is not a split. No boundary "
+               "count as the split, and the parent suffix. Every parcel comes in current; nothing is "
+               "retired. Leave it off when the suffix is not a split. No boundary "
                "lines are created. The same outline is imported once. A text "
-               "field keeps leading zeros. A multi-polygon parcel keeps every part, and true "
-               "curves stay curves.",
+               "field keeps leading zeros. Polygons with the same number become one parcel, all-zero "
+               "numbers come in without a number, and true curves stay curves.",
     "Lots": "Copies lot polygons into the Lots table. Tax parcels stay in Parcels. A lot drawn "
             "with Subdivide Block stays in Parcels.",
     "Blocks": "Copies subdivision block polygons into the Blocks table. Tax parcels stay in "
               "Parcels. A lot drawn with Subdivide Block stays in Parcels.",
     "Subdivisions": "Copies subdivision polygons into the Subdivisions table.",
 }
+_PLAT_INFO = (" Each parcel's empty Subdivision, Block and Lot are filled from the Lots, Blocks and "
+              "Subdivisions imported so far: lots by parcel number, the rest by location. Import the "
+              "layers in any order.")
 
 
 def _guess_field(layer, candidates):
@@ -213,8 +216,11 @@ class ExchangeDialog(QDialog):
         book_row.addStretch(1)
         self.history = QCheckBox("Build split history")
         self.history.setChecked(True)
-        self.history.setToolTip("Link each split to the parent. The parent is retired only "
-                                "when a child has a later recorded date.")
+        self.history.setToolTip("Link each split, as an inferred split, to the lower number it was cut out of "
+                                "(its shape fills a notch), or else to the parent suffix. "
+                                "Nothing is retired.")
+        self.date_field.setToolTip("The date each parcel was recorded. With a last-edited date, Parcel "
+                                   "History shows parcels from when they were last edited.")
         sep, digits, parent = number_pattern(self.fab.settings if self.fab is not None else {})
         self.num_sep = QLineEdit(sep)
         self.num_sep.setMaximumWidth(48)
@@ -274,7 +280,7 @@ class ExchangeDialog(QDialog):
     def _target_changed(self, name):
         names = ["Parcels", "Lots", "Blocks", "Subdivisions"]
         self.stack.setCurrentIndex(names.index(name) if name in names else 0)
-        self.layer_info.setText(_LAYER_INFO.get(name, _LAYER_INFO["Parcels"]))
+        self.layer_info.setText(_LAYER_INFO.get(name, _LAYER_INFO["Parcels"]) + _PLAT_INFO)
 
     def _bind_fields(self, layer):
         for box, names in self._field_boxes:
@@ -378,8 +384,18 @@ class ExchangeDialog(QDialog):
         if result.get("records"):
             bits.append("Filed %d records, one per parcel id." % result["records"])
         if result.get("history_linked"):
-            bits.append("Split history linked %d and retired %d." % (
-                result["history_linked"], result.get("history_retired") or 0))
+            bits.append("Split history linked %d (inferred from the numbers)." % result["history_linked"])
+        if result.get("joined"):
+            bits.append("%d parcels have several polygons." % result["joined"])
+        if result.get("overlapping"):
+            bits.append("%d polygons overlap another with the same number; run Check Fabric."
+                        % result["overlapping"])
+        plat = result.get("plat") or {}
+        filled = ["%d %s" % (plat[k], k.lower()) for k in ("Subdivision", "Block", "Lot") if plat.get(k)]
+        if filled:
+            bits.append("Filled on parcels: %s." % ", ".join(filled))
+        if plat.get("too_long"):
+            bits.append("%d lot or block lists are too long for the field and were left blank." % plat["too_long"])
         if left:
             bits.append("Left out: %s." % ", ".join(left))
         self._say(" ".join(bits))

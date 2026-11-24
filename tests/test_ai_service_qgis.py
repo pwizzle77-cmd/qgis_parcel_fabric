@@ -161,7 +161,7 @@ class SettingsUiTests(unittest.TestCase):
         from qgis.PyQt.QtWidgets import QTabWidget
         settings = Settings()
         fabric = SimpleNamespace(name='Test Fabric', settings={}, parcel_types=['Tax'], tolerance=.05,
-                                 warn_ratio=10000, packed_dms=False, number_types=[], save_settings=Mock())
+                                 warn_ratio=10000, packed_dms=False, number_types=[], multipart=True, save_settings=Mock())
         with patch.object(ai_settings, 'QgsSettings', return_value=settings):
             dialog = settings_dialog.SettingsDialog(fabric)
             tabs = dialog.findChild(QTabWidget)

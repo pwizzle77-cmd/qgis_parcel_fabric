@@ -11,6 +11,8 @@ from . import schema as S
 from .fabric import EditSession, quote
 from .parcel_numbers import unfiltered
 
+INFERRED = "Inferred split"     # read from parcel numbers on import, not from a recorded split
+
 
 def add(fabric, record_gid, operation, parents, children):
     """Write parent -> child rows (every parent to every child)."""

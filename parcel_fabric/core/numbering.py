@@ -86,6 +86,12 @@ def fields_for(number):
             "SplitNo": p["split"]}
 
 
+def is_placeholder(number):
+    """True for a number with no digit but 0, such as 00-00-00-00000-000: a parcel nobody has numbered."""
+    text = "" if number is None else str(number)
+    return bool(re.search("0", text)) and not re.search("[1-9A-Za-z]", text)
+
+
 def number_pattern(settings):
     """(separator, digits, parent suffix). Missing values are -, 3, 000."""
     s = settings or {}

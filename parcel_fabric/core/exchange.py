@@ -358,6 +358,16 @@ def _pack_parcel(target, parts):
     return QgsGeometry(surface)
 
 
+def _join_parcel(target, parts):
+    """One parcel from several features. Polygons that share a side are dissolved."""
+    packed = _pack_parcel(target, parts)
+    flat = QgsGeometry(packed.constGet().segmentize())
+    if flat.isGeosValid() or packed.constGet().hasCurvedSegments():
+        return packed
+    whole = QgsGeometry.unaryUnion([QgsGeometry(p) for p in parts])
+    return _pack_parcel(target, _surface_parts(whole)) if whole.isGeosValid() else packed
+
+
 def _has_area(geom):
     if geom is None or geom.isEmpty():
         return False
@@ -489,18 +499,60 @@ def _stamp_footprints(fabric, record_gids):
             ed.change(fabric.records, fid, "ParcelCount", len(parts))
 
 
-def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
-    """Lineage from the parent suffix to the other -NNN pieces of these stems.
+def _border(a, b, reach):
+    """Length of the border two polygons share; 0 when they only meet at a corner."""
+    if not a.boundingBox().buffered(reach).intersects(b.boundingBox()) or a.distance(b) > reach:
+        return 0.0
+    length = a.buffer(reach, 2).intersection(QgsGeometry(b.constGet().boundary())).length()
+    return length if length > 10 * reach else 0.0
 
-    The parent is retired only when a child record is dated later. No dates
-    means lineage only. Returns (linked, retired).
+
+def _foot(fabric):
+    """Map units in a foot, or None where map areas mean nothing (degrees, Web Mercator)."""
+    try:
+        return fabric.map_units_per_foot
+    except ValueError:
+        return None
+
+
+CUT_OUT = 0.4       # a square corner cut is half inside the parent's outline; a neighbour is 0
+
+
+def _cut_from(child, lower, reach):
+    """Key of the polygon ``child`` was cut out of, or None.
+
+    ``lower`` are (key, polygon). A piece cut out of a parcel fills a notch: much of it
+    lies inside the outline (convex hull) of what is left. A neighbour, such as the next
+    platted lot, only shares a side.
+    """
+    best, found = CUT_OUT, None
+    for key, polygon in lower:
+        if polygon.area() <= child.area():
+            continue
+        for part in parts_of(polygon):      # pieces that lie apart have no outline in common
+            hull = part.convexHull()
+            if not hull.boundingBox().intersects(child.boundingBox()) or not _border(child, part, reach):
+                continue
+            inside = child.intersection(hull).area() / child.area()
+            if inside >= best:
+                best, found = inside, key
+    return found
+
+
+def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
+    """Inferred lineage between the -NNN pieces of these stems. Nothing is retired.
+
+    A parcel came from the lower number it was cut out of (_cut_from), else from the
+    parent suffix (000). With neither there is nothing to go by, so no link. A parcel
+    that already has a parent keeps it. Returns how many links were made.
     """
     import datetime
+    from .lineage import INFERRED
     from .numbering import split_parts
     from .parcel_numbers import unfiltered
 
     if not stems:
-        return 0, 0
+        return 0
     groups = {}
     lyr = unfiltered(fabric.parcels)
     req = QgsFeatureRequest().setFilterExpression(type_expr(ptype))
@@ -509,69 +561,44 @@ def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
         if parts is None or parts[0] not in stems:
             continue
         groups.setdefault(parts[0], []).append((parts[1], feat))
-    have = {(row["ParentID"], row["ChildID"]) for row in fabric.lineage.getFeatures()}
-    dates = {}
-
-    def rec_date(gid):
-        if gid not in dates:
-            rec = fabric.record_by_id(gid) if gid else None
-            dates[gid] = _as_qdate(rec["RecordedDate"]) if rec is not None else None
-        return dates[gid]
-
-    linked = retired = 0
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    lineage_rows = []
-    parcel_edits = []
+    has_parent = {row["ChildID"] for row in fabric.lineage.getFeatures()}
+    foot = _foot(fabric)
+    pairs = []
     for members in groups.values():
-        parent = None
-        children = []
+        members.sort(key=lambda m: m[0])
+        parent = next((feat for split, feat in members if split == parent_suffix), None)
+        shapes = []
         for split, feat in members:
-            if split == parent_suffix and parent is None:
-                parent = feat
-            elif split != parent_suffix:
-                children.append(feat)
-        if parent is None:
-            continue
-        pdate = rec_date(parent["CreatedByRecord"])
-        retire_gid = None
-        retire_on = None
-        for child in children:
-            pg, cg = parent["GlobalID"], child["GlobalID"]
-            if cg and cg != pg and (pg, cg) not in have:
-                lineage_rows.append((parent, child))
-                have.add((pg, cg))
-                linked += 1
-            cdate = rec_date(child["CreatedByRecord"])
-            if pdate is not None and cdate is not None and cdate > pdate:
-                if retire_on is None or cdate < retire_on:
-                    retire_on = cdate
-                    retire_gid = child["CreatedByRecord"]
+            geom = feat.geometry()
+            shapes.append((split, feat, QgsGeometry(geom.constGet().segmentize())))
+        for split, feat, shape in shapes:
+            if split == parent_suffix or feat["GlobalID"] in has_parent:
+                continue
+            lower = [(f, g) for s, f, g in shapes if s < split]
+            source = (_cut_from(shape, lower, foot) if foot else None) or parent
+            if source is not None:
+                pairs.append((source, feat))
+    if not pairs:
+        return 0
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lin = fabric.lineage
+    with EditSession([lin, lyr], "Split history") as ed:
+        for parent, child in pairs:
+            feat = QgsFeature(lin.fields())
+            vals = {"GlobalID": S.new_guid(), "RecordID": child["CreatedByRecord"],
+                    "Operation": INFERRED, "ParentID": parent["GlobalID"],
+                    "ChildID": child["GlobalID"],
+                    "ParentNumber": parent["ParcelNumber"] or None,
+                    "ChildNumber": child["ParcelNumber"] or None,
+                    "ParcelType": child["ParcelType"], "EditDate": now}
+            for key, value in vals.items():
+                i = lin.fields().indexOf(key)
+                if i >= 0:
+                    feat.setAttribute(i, value)
+            ed.add(lin, feat)
             if not child["ParentNumber"]:
-                parcel_edits.append((child.id(), "ParentNumber", parent["ParcelNumber"]))
-        if retire_gid and not parent["RetiredByRecord"]:
-            parcel_edits.append((parent.id(), "RetiredByRecord", retire_gid))
-            retired += 1
-    if lineage_rows:
-        lin = fabric.lineage
-        with EditSession([lin], "Split history") as ed:
-            for parent, child in lineage_rows:
-                feat = QgsFeature(lin.fields())
-                vals = {"GlobalID": S.new_guid(), "RecordID": child["CreatedByRecord"],
-                        "Operation": "Split", "ParentID": parent["GlobalID"],
-                        "ChildID": child["GlobalID"],
-                        "ParentNumber": parent["ParcelNumber"] or None,
-                        "ChildNumber": child["ParcelNumber"] or None,
-                        "ParcelType": child["ParcelType"], "EditDate": now}
-                for key, value in vals.items():
-                    i = lin.fields().indexOf(key)
-                    if i >= 0:
-                        feat.setAttribute(i, value)
-                ed.add(lin, feat)
-    if parcel_edits:
-        with EditSession([lyr], "Split history") as ed:
-            for fid, field, value in parcel_edits:
-                ed.change(lyr, fid, field, value)
-    return linked, retired
+                ed.change(lyr, child.id(), "ParentNumber", parent["ParcelNumber"])
+    return len(pairs)
 
 
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
@@ -586,19 +613,20 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     Pass ``record`` to file everything under a record that already exists. That path
     leaves the record's book and page alone.
 
-    ``split_history`` links suffixes to the parent (000 unless ``parent_suffix``
-    says otherwise). ``separator`` and ``digits`` come from fabric settings when
-    omitted: a hyphen and 3 digits read 12345-002, and a hyphen still reads a
-    Florida strap. The parent is retired only when a child
-    has a later date. No lines or points are created. A strap fills the section
+    ``split_history`` adds inferred links from suffixes to the parent (000 unless
+    ``parent_suffix`` says otherwise); see _link_splits. ``separator`` and ``digits``
+    come from fabric settings when omitted: a hyphen and 3 digits read 12345-002, and
+    a hyphen still reads a Florida strap. Every imported parcel is current: nothing is
+    retired. CalculatedArea is the map area. No lines or points are created. A strap fills the section
     fields; any other id is stored as typed. A parcel with several polygons,
-    including true curves, is stored as one multi-surface. A GeoPackage that
+    including true curves, is stored as one multi-surface, also when the layer has
+    one feature per polygon. A number that is all zeros is no number. A GeoPackage that
     still allows one polygon per parcel is switched (a backup is saved).
     shortcut: the same outline is imported once; stack a condo with Stacked Unit
     when the layer has more than one number on one polygon.
     """
     from qgis.core import QgsSpatialIndex, QgsWkbTypes
-    from .numbering import NumberError, fields_for, number_pattern, split_parts
+    from .numbering import NumberError, fields_for, is_placeholder, number_pattern, split_parts
     from .parcel_numbers import used_numbers
 
     if record is not None and fabric.record_by_id(record) is None:
@@ -641,6 +669,36 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     target, fields = fabric.parcels, fabric.parcels.fields()
     pending, made, by_number, stems = [], [], {}, set()
     blank_gid = None
+    foot = _foot(fabric)
+
+    def area(geom):
+        """Square feet, like the area Build works out from the dimensions."""
+        return geom.area() / foot ** 2 if foot else None
+
+    mine, joined = {}, {}       # number -> [GlobalID, its polygons]; numbers drawn as several features
+    overlapping = 0
+
+    def allow_multipart():
+        """Switch a one-polygon-per-parcel fabric. False when it can't be switched."""
+        nonlocal backup, convert_error, target, fields
+        if fabric.multipart:
+            return True
+        if convert_error is None:
+            flush()
+            src = fabric.parcels.source() or ""
+            if fabric.parcels.providerType() == "ogr" and ".gpkg" in src.lower():
+                subset = fabric.parcels.subsetString()
+                try:
+                    backup = fabric.convert_to_multipart()
+                    if subset:
+                        fabric.parcels.setSubsetString(subset)
+                    target, fields = fabric.parcels, fabric.parcels.fields()
+                except RuntimeError as e:
+                    convert_error = str(e)
+            else:
+                convert_error = ("This fabric stores one polygon per parcel. "
+                                 "A GeoPackage can be switched in Fabric Settings.")
+        return fabric.multipart
 
     def remember(geom):
         nonlocal next_id
@@ -704,46 +762,46 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             body.dropZValue()
             body.dropMValue()
         parts = _surface_parts(prepared)
-        if len(parts) > 1 and not fabric.multipart:
-            if backup is None and convert_error is None:
-                flush()
-                src = fabric.parcels.source() or ""
-                if fabric.parcels.providerType() == "ogr" and ".gpkg" in src.lower():
-                    subset = fabric.parcels.subsetString()
-                    try:
-                        backup = fabric.convert_to_multipart()
-                        if subset:
-                            fabric.parcels.setSubsetString(subset)
-                        target, fields = fabric.parcels, fabric.parcels.fields()
-                    except RuntimeError as e:
-                        convert_error = str(e)
-                else:
-                    convert_error = ("This fabric stores one polygon per parcel. "
-                                     "A GeoPackage can be switched in Fabric Settings.")
-            if not fabric.multipart:
-                skipped["multipart"] += 1
-                continue
+        if len(parts) > 1 and not allow_multipart():
+            skipped["multipart"] += 1
+            continue
         geom = _pack_parcel(target, parts)
         if not _has_area(geom):
             skipped["empty" if len(parts) <= 1 else "multipart"] += 1
             continue
+        text = _attr_text(feat, number_field)
         try:
-            vals = fields_for(_attr_text(feat, number_field))
+            vals = fields_for("" if is_placeholder(text) else text)
         except NumberError:
             skipped["too_long"] += 1
             continue
         number = vals.get("ParcelNumber")
-        if number and number in used:
+        if number and number in used and number not in mine:
             skipped["duplicate"] += 1
             continue
         if _same_outline(geom, index, held):
             skipped["same"] += 1
             continue
+        if number in mine:
+            # another polygon of a parcel already imported
+            flat = QgsGeometry(geom.constGet().segmentize())
+            whole = [QgsGeometry(p.constGet().segmentize()) for p in mine[number][1]]
+            if any(flat.intersection(p).area() > 0.01 * min(flat.area(), p.area()) for p in whole):
+                overlapping += 1        # not one parcel: kept as its own, for Check Fabric to report
+            elif allow_multipart():
+                mine[number][1].extend(parts)
+                joined[number] = mine[number]
+                remember(geom)
+                continue
+            else:
+                skipped["multipart"] += 1
+                continue
         when = _as_qdate(feat[date_field]) if date_field and feat.fields().indexOf(date_field) >= 0 else None
         nf = QgsFeature(fields)
         nf.setGeometry(geom)
         base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0,
-                "StatedAreaUnit": 1, "CreatedByRecord": take_record(number, when), "Name": number}
+                "StatedAreaUnit": 1, "CreatedByRecord": take_record(number, when), "Name": text or None,
+                "CalculatedArea": area(geom)}
         base.update(vals)
         for key, value in base.items():
             i = fields.indexOf(key)
@@ -752,6 +810,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         batch.append(nf)
         if number:
             used.add(number)
+            mine.setdefault(number, [base["GlobalID"], list(parts)])
             stem = split_parts(number, separator, digits)
             if stem:
                 stems.add(stem[0])
@@ -760,11 +819,21 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             flush()
     flush()
     target.reload()
-    linked = retired = 0
+    if joined:
+        _tell(progress, 91, "Joining parcels with several polygons")
+        shapes = {gid: parts for gid, parts in joined.values()}
+        with EditSession([target], "Imported parcels") as ed:
+            for gids in (list(shapes)[k:k + 400] for k in range(0, len(shapes), 400)):
+                req = QgsFeatureRequest().setFilterExpression(
+                    '"GlobalID" IN (%s)' % ", ".join(quote(g) for g in gids))
+                for feat in list(target.getFeatures(req)):
+                    geom = _join_parcel(target, shapes[feat["GlobalID"]])
+                    ed.set_geometry(target, feat.id(), geom)
+                    ed.change(target, feat.id(), "CalculatedArea", area(geom))
+    linked = 0
     if split_history and stems:
         _tell(progress, 92, "Linking split history")
-        linked, retired = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems,
-                                       separator, digits)
+        linked = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems, separator, digits)
         target.reload()
     record_ids = [] if record else list(made)
     date_ids = []
@@ -784,10 +853,11 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             from qgis.core import Qgis, QgsMessageLog
             QgsMessageLog.logMessage("History dates not refreshed: %s" % e, "Parcel Fabric",
                                      Qgis.MessageLevel.Warning)
+    result = _fill_plat(fabric, {}, progress, 97)
     _tell(progress, 100, "Import finished")
-    return {"copied": copied, "skipped": skipped, "backup": backup, "multipart_note": convert_error,
+    return {"plat": result["plat"], "copied": copied, "skipped": skipped, "backup": backup, "multipart_note": convert_error,
             "records": len(record_ids), "record_ids": record_ids,
-            "history_linked": linked, "history_retired": retired}
+            "history_linked": linked, "joined": len(joined), "overlapping": overlapping}
 
 
 def _write_features(layer, batch):
@@ -887,9 +957,28 @@ def _copy_outlines(target, source, row_for, progress=None, label="features"):
     return {"copied": copied, "skipped": skipped}
 
 
+def _fill_plat(fabric, result, progress, start):
+    """Subdivision, block and lot onto the parcels, reported with the import."""
+    from .plat import fill
+    text = "Filling subdivision, block and lot on parcels"
+    result["plat"] = fill(fabric, lambda frac: _tell(progress, start + (99 - start) * frac, text))
+    return result
+
+
+def _plat_import(fabric, target, source, row, progress, label):
+    if fabric.parcels.isEditable():
+        raise RuntimeError("Save or discard edits on Parcels first. This import fills their lot, block and subdivision.")
+
+    def first(pct, text=None):
+        _tell(progress, pct * 0.6, text)
+    result = _fill_plat(fabric, _copy_outlines(target, source, row, first, label), progress, 60)
+    _tell(progress, 100, "Import finished")
+    return result
+
+
 def import_lots(fabric, source, lot_field=None, subdivision_field=None, block_field=None,
                 parcel_field=None, progress=None):
-    """Copy a county lot layer into Lots. Tax parcels stay in Parcels.
+    """Copy a county lot layer into Lots, and the lot numbers onto the parcels (see plat.fill).
 
     shortcut: a lot drawn with Subdivide Block stays in Parcels. This table is
     only for a lot layer that already exists.
@@ -900,14 +989,14 @@ def import_lots(fabric, source, lot_field=None, subdivision_field=None, block_fi
                 "Block": _cut(_attr_text(feat, block_field), 16),
                 "Subdivision": _cut(_attr_text(feat, subdivision_field), 80),
                 "ParcelNumber": _cut(_attr_text(feat, parcel_field), 30)}
-    return _copy_outlines(fabric.lots, source, row, progress, "lots")
+    return _plat_import(fabric, fabric.lots, source, row, progress, "lots")
 
 
 def import_subdivisions(fabric, source, name_field=None, progress=None):
     """Copy subdivision polygons into Subdivisions."""
     def row(feat):
         return {"GlobalID": S.new_guid(), "Name": _cut(_attr_text(feat, name_field), 255)}
-    return _copy_outlines(fabric.subdivisions, source, row, progress, "subdivisions")
+    return _plat_import(fabric, fabric.subdivisions, source, row, progress, "subdivisions")
 
 
 def import_blocks(fabric, source, block_field=None, subdivision_field=None, progress=None):
@@ -920,7 +1009,7 @@ def import_blocks(fabric, source, block_field=None, subdivision_field=None, prog
         return {"GlobalID": S.new_guid(),
                 "Block": _cut(_attr_text(feat, block_field), 16),
                 "Subdivision": _cut(_attr_text(feat, subdivision_field), 80)}
-    return _copy_outlines(fabric.blocks, source, row, progress, "blocks")
+    return _plat_import(fabric, fabric.blocks, source, row, progress, "blocks")
 
 
 # --------------------------------------------------------------------------
@@ -1009,13 +1098,16 @@ def _parcel_by_gid(layer, gid):
 
 
 def change_rows(fabric, since):
-    """Lineage since ``since`` (yyyy-mm-dd). Undated rows are left out."""
+    """Lineage since ``since`` (yyyy-mm-dd). Undated rows, and splits only inferred on import, are left out."""
+    from .lineage import INFERRED
     from .parcel_numbers import unfiltered
     since = since or ""
     parcels = unfiltered(fabric.parcels)
     crs = fabric.parcels.crs()
     rows = []
     for lin in fabric.lineage.getFeatures():
+        if lin["Operation"] == INFERRED:
+            continue
         rec = fabric.record_by_id(lin["RecordID"]) if lin["RecordID"] else None
         recorded = _date_text(rec["RecordedDate"]) if rec is not None else ""
         edited = (lin["EditDate"] or "")[:10]

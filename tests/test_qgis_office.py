@@ -298,7 +298,6 @@ class OfficeTests(_Base):
         self.assertEqual(out["copied"], 10)
         self.assertEqual(out["records"], 10)
         self.assertEqual(out["history_linked"], 4)
-        self.assertEqual(out["history_retired"], 2)
         self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 0)
 
         by_pid = {}
@@ -310,7 +309,7 @@ class OfficeTests(_Base):
         self.assertEqual(parent["Name"], "12-4S-16-02942-000")
         self.assertFalse(parent["Book"])
         self.assertFalse(parent["Page"])
-        self.assertEqual(parent["ParcelCount"], 0)
+        self.assertEqual(parent["ParcelCount"], 1)
         child = by_pid["12-4S-16-02942-001"]
         self.assertEqual(child["ParcelCount"], 1)
         self.assertGreater(child.geometry().area(), 0)
@@ -320,21 +319,17 @@ class OfficeTests(_Base):
         alln = {f["ParcelNumber"]: f for f in unfiltered(self.fab.parcels).getFeatures() if f["ParcelNumber"]}
         self.assertEqual(alln["12-4S-16-02942-000"]["Section"], 12)
         self.assertEqual(alln["12-4S-16-02942-000"]["SplitNo"], 0)
-        self.assertTrue(alln["12-4S-16-02942-000"]["RetiredByRecord"])
-        self.assertFalse(alln["12-4S-16-02942-001"]["RetiredByRecord"])
-        self.assertFalse(alln["12-4S-16-02942-002"]["RetiredByRecord"])
+        self.assertEqual([n for n, f in alln.items() if f["RetiredByRecord"]], [])   # a later child date isn't a split
         self.assertEqual(alln["12-4S-16-02942-001"]["ParentNumber"], "12-4S-16-02942-000")
-        self.assertEqual(ymd(alln["12-4S-16-02942-000"]["QPF_EndDate"]), "2010-06-01")
-        self.assertTrue(alln["R9-000"]["RetiredByRecord"])
-        self.assertFalse(alln["88-000"]["RetiredByRecord"])
-        self.assertFalse(alln["55-001"]["RetiredByRecord"])
-        self.assertFalse(alln["55-002"]["RetiredByRecord"])
+        self.assertFalse(alln["12-4S-16-02942-000"]["QPF_EndDate"])
+        self.assertEqual({r["Operation"] for r in self.fab.lineage.getFeatures()}, {"Inferred split"})
+        self.assertEqual(X.change_rows(self.fab, ""), [])
         pairs = {(r["ParentNumber"], r["ChildNumber"]) for r in self.fab.lineage.getFeatures()}
         self.assertIn(("12-4S-16-02942-000", "12-4S-16-02942-001"), pairs)
         self.assertIn(("12-4S-16-02942-000", "12-4S-16-02942-002"), pairs)
         self.assertIn(("R9-000", "R9-001"), pairs)
         self.assertIn(("88-000", "88-001"), pairs)
-        self.assertFalse(any(str(a).startswith("55-") or str(b).startswith("55-") for a, b in pairs))
+        self.assertFalse(any(str(a).startswith("55-") or str(b).startswith("55-") for a, b in pairs))  # don't touch
 
         off = layer("off")
         off.dataProvider().addFeatures([
@@ -350,10 +345,10 @@ class OfficeTests(_Base):
         custom.dataProvider().addFeatures([
             feat(custom, 0, "66-001", "2001-01-01", 200), feat(custom, 1, "66-002", "2003-01-01", 200)])
         spun = X.import_parcel_layer(self.fab, custom, "Tax", None, "PIN", "DEEDDATE", True, "1")
-        self.assertEqual(spun["history_retired"], 1)
+        self.assertEqual(spun["history_linked"], 1)
         spun_rows = {f["ParcelNumber"]: f for f in unfiltered(self.fab.parcels).getFeatures()
                      if f["ParcelNumber"] in ("66-001", "66-002")}
-        self.assertTrue(spun_rows["66-001"]["RetiredByRecord"])
+        self.assertFalse(spun_rows["66-001"]["RetiredByRecord"])
         self.assertEqual(spun_rows["66-002"]["ParentNumber"], "66-001")
 
         wide = layer("wide")
@@ -363,7 +358,178 @@ class OfficeTests(_Base):
         four = X.import_parcel_layer(
             self.fab, wide, "Tax", None, "PIN", "DEEDDATE", True, "0", "-", 4)
         self.assertEqual(four["history_linked"], 1)
-        self.assertEqual(four["history_retired"], 1)
+
+    def county(self, *rows):
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String), QgsField("EDITED", QVariant.String)])
+        lyr.updateFields()
+        for (x0, y0, x1, y1), pin, when in rows:
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(box(X0 + x0, Y0 + y0, X0 + x1, Y0 + y1))
+            f.setAttributes([pin, when])
+            lyr.dataProvider().addFeatures([f])
+        return lyr
+
+    def links(self):
+        return sorted((r["ParentNumber"][-3:], r["ChildNumber"][-3:]) for r in self.fab.lineage.getFeatures())
+
+    def test_a_split_is_linked_to_the_parcel_it_was_cut_out_of(self):
+        n = "12-4S-16-02950-"
+        lyr = self.county(((0, 0, 900, 400), n + "002", "2023-02-02"),
+                          ((600, 600, 900, 800), n + "004", "2024-10-23"),          # a corner of 001
+                          ((200, 800, 300, 900), n + "005", ""),                    # beside 001, not out of it
+                          ((5000, 0, 5100, 100), n + "007", ""))
+        f = QgsFeature(lyr.fields())
+        f.setGeometry(box(X0, Y0 + 400, X0 + 900, Y0 + 800).difference(box(X0 + 600, Y0 + 600, X0 + 900, Y0 + 800)))
+        f.setAttributes([n + "001", "2024-10-23"])
+        lyr.dataProvider().addFeatures([f])
+        out = X.import_parcel_layer(self.fab, lyr, "Tax", None, "PIN", "EDITED")
+        self.assertEqual(out["copied"], 5)
+        self.assertEqual(self.links(), [("001", "004")])
+        self.assertEqual(X._link_splits(self.fab, "Tax", 0, {n[:-1]}), 0)
+        X.import_parcel_layer(self.fab, self.county(((0, 2000, 900, 2400), n + "000", "")), "Tax", None, "PIN")
+        # the original only takes the ones with no better evidence
+        self.assertEqual(self.links(), [("000", "001"), ("000", "002"), ("000", "005"), ("000", "007"), ("001", "004")])
+
+    def test_import_into_meters_and_web_mercator(self):
+        import os
+        from parcel_fabric.core import schema as S
+        from parcel_fabric.core.fabric import Fabric
+        for crs, size in (("EPSG:26917", 0.3048006096 ** 2), ("EPSG:3857", None)):
+            path = os.path.join(self.tmp, crs[5:] + ".gpkg")
+            S.create_fabric("ogr", path, "", "", ["Tax"], crs, {"plss_use_default": "0"})
+            fab = Fabric.open("ogr", path)
+            out = X.import_parcel_layer(fab, self.county(
+                ((0, 0, 100, 100), "12-4S-16-02942-000", ""), ((100, 0, 200, 100), "12-4S-16-02942-001", "")),
+                "Tax", None, "PIN")
+            self.assertEqual((out["copied"], out["history_linked"]), (2, 1))
+            for f in fab.parcels.getFeatures():
+                if size is None:
+                    self.assertFalse(f["CalculatedArea"])
+                else:
+                    self.assertAlmostEqual(f["CalculatedArea"], 10000, delta=10)     # grid scale differs slightly
+
+    def plat(self, kind, *rows):
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", kind, "memory")
+        lyr.dataProvider().addAttributes([QgsField(n, QVariant.String) for n in ("A", "B", "SUB", "PIN")])
+        lyr.updateFields()
+        for (x0, y0, x1, y1), *vals in rows:
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(box(X0 + x0, Y0 + y0, X0 + x1, Y0 + y1))
+            f.setAttributes(list(vals) + [""] * (4 - len(vals)))
+            lyr.dataProvider().addFeatures([f])
+        return lyr
+
+    def platted(self):
+        out = {}
+        for f in self.fab.parcels.getFeatures():
+            out[f["ParcelNumber"]] = tuple(f[k] or "" for k in ("Subdivision", "Block", "Lot"))
+        return out
+
+    PARCELS = (((0, 0, 300, 100), "P-ONE", ""),             # lots 1-3
+               ((300, 0, 400, 100), "P-TWO", ""),           # lot 4 and, by number, lot 9 elsewhere
+               ((400, 0, 450, 100), "P-HALF", ""),          # the west half of lot 5
+               ((1000, 0, 1100, 100), "P-FAR", ""),         # outside the plat, beside its edge
+               ((0, 100, 500, 300), "P-BLOCKB", ""))        # a whole block without lots
+
+    def imports(self):
+        lots = self.plat("lots", *[((100 * k, 0.4, 100 * k + 100, 99.8), str(k + 1), "", "OAKS UNIT 1") for k in range(5)],
+                         ((2000, 0, 2100, 100), "9", "", "OAKS UNIT 1", "P-TWO"), ((2000, 200, 2100, 300), "", "", ""))
+        blocks = self.plat("blocks", ((0, 0, 500, 100), "A"), ((0, 100, 500, 300), "B"))
+        subs = self.plat("subs", ((-1, -1, 501, 301), "OAKS"), ((990, 0, 1005, 100), "EDGE"))
+        return {"parcels": lambda: X.import_parcel_layer(self.fab, self.county(*self.PARCELS), "Tax", None, "PIN"),
+                "lots": lambda: X.import_lots(self.fab, lots, "A", "SUB", "B", "PIN"),
+                "blocks": lambda: X.import_blocks(self.fab, blocks, "A", "SUB"),
+                "subs": lambda: X.import_subdivisions(self.fab, subs, "A")}
+
+    def test_lot_block_and_subdivision_reach_the_parcels_in_any_order(self):
+        import itertools
+        want = {"P-ONE": ("OAKS", "A", "1-3"), "P-TWO": ("OAKS", "A", "4,9"), "P-HALF": ("OAKS", "A", "5"),
+                "P-FAR": ("", "", ""), "P-BLOCKB": ("OAKS", "B", "")}
+        for order in itertools.permutations(("parcels", "lots", "blocks", "subs")):
+            with self.subTest(order=order):
+                jobs = self.imports()
+                results = [jobs[name]() for name in order]
+                self.assertEqual(self.platted(), want)
+                self.assertTrue(all("plat" in r for r in results))
+                again = jobs["lots"]()
+                self.assertEqual((again["copied"], sum(again["plat"].values())), (0, 0))
+                self.tearDown()
+                self.setUp()
+
+    def test_typed_lot_and_subdivision_are_kept_and_long_lists_left_blank(self):
+        X.import_parcel_layer(self.fab, self.county(
+            ((0, 0, 300, 100), "P-ONE", ""), ((0, 200, 4000, 300), "P-MANY", "")), "Tax", None, "PIN")
+        one = next(f for f in self.fab.parcels.getFeatures() if f["ParcelNumber"] == "P-ONE")
+        from parcel_fabric.core.fabric import EditSession
+        with EditSession([self.fab.parcels]) as ed:
+            ed.change(self.fab.parcels, one.id(), "Lot", "TRACT 7")
+            ed.change(self.fab.parcels, one.id(), "Subdivision", "MY NAME")
+        out = X.import_lots(self.fab, self.plat(
+            "lots", ((0, 0, 300, 100), "1", "", "OAKS"),
+            *[((200 * k, 200, 200 * k + 200, 300), str(2 * k + 1), "", "OAKS") for k in range(20)]), "A", "SUB", "B", "PIN")
+        X.import_subdivisions(self.fab, self.plat("subs", ((-1, -1, 4001, 301), "OAKS PLAT")), "A")
+        self.assertEqual(self.platted(), {"P-ONE": ("MY NAME", "", "TRACT 7"), "P-MANY": ("OAKS PLAT", "", "")})
+        self.assertEqual(out["plat"]["too_long"], 1)
+        self.fab.parcels.startEditing()
+        with self.assertRaises(RuntimeError):
+            X.import_blocks(self.fab, self.plat("blocks", ((0, 0, 300, 100), "A")), "A", "SUB")
+        self.assertEqual(self.fab.blocks.featureCount(), 0)
+        self.fab.parcels.rollBack()
+
+    def test_joined_lot_numbers(self):
+        from parcel_fabric.core.plat import join_values
+        for values, text in ((["3", "1", "2", "5"], "1-3,5"), (["1", "2"], "1,2"), (["10", "9", "A", "9"], "9,10,A"),
+                             (["", "7"], "7"), ([], ""), (["LOT 10", "LOT 9"], "LOT 9,LOT 10")):
+            self.assertEqual(join_values(values, 16), text)
+
+    def test_neighbouring_lots_are_not_splits_of_each_other(self):
+        n = "12-4S-16-02951-"
+        X.import_parcel_layer(self.fab, self.county(*[
+            ((100 * k, 0, 100 * k + 100, 150), n + "%03d" % (101 + k), "202%d-01-01" % k) for k in range(5)]),
+            "Tax", None, "PIN", "EDITED")
+        self.assertEqual(self.links(), [])
+
+    def test_a_parcel_with_a_recorded_parent_is_not_given_another(self):
+        from parcel_fabric.core import lineage as L
+        n = "12-4S-16-02952-"
+        X.import_parcel_layer(self.fab, self.county(
+            ((0, 0, 100, 100), n + "002", ""), ((100, 0, 200, 100), n + "003", "")), "Tax", None, "PIN", None, False)
+        have = {f["ParcelNumber"]: f for f in self.fab.parcels.getFeatures()}
+        L.add(self.fab, None, "Split", [have[n + "002"]], [have[n + "003"]])
+        X.import_parcel_layer(self.fab, self.county(((0, 100, 200, 200), n + "000", "")), "Tax", None, "PIN")
+        self.assertEqual(self.links(), [("000", "002"), ("002", "003")])
+
+    def test_polygons_sharing_a_number_become_one_parcel_and_placeholders_stay(self):
+        n, zero = "12-4S-16-02960-000", "00-00-00-00000-000"
+        rows = [((0, 0, 100, 100), n, "2024-01-01"), ((300, 0, 400, 100), n, "2024-01-01"),
+                ((600, 0, 700, 100), n, "2024-01-01"), ((0, 300, 50, 350), zero, ""), ((100, 300, 150, 350), zero, ""),
+                ((1000, 0, 1100, 100), "12-4S-16-02961-000", ""), ((1050, 0, 1150, 100), "12-4S-16-02961-000", "")]
+        out = X.import_parcel_layer(self.fab, self.county(*rows), "Tax", None, "PIN", "EDITED")
+        self.assertEqual((out["copied"], out["joined"], out["overlapping"], sum(out["skipped"].values())), (5, 1, 1, 0))
+        feats = list(self.fab.parcels.getFeatures())
+        self.assertAlmostEqual(sum(f.geometry().area() for f in feats), 3 * 10000 + 2 * 2500 + 2 * 10000, places=3)
+        parcel, = [f for f in feats if f["ParcelNumber"] == n]
+        geom = parcel.geometry()
+        self.assertEqual(geom.constGet().numGeometries(), 3)
+        self.assertAlmostEqual(parcel["CalculatedArea"], 30000, places=3)
+        self.assertAlmostEqual(max(f["CalculatedArea"] for f in feats if not f["ParcelNumber"]), 2500, places=3)
+        self.assertAlmostEqual(self.fab.record_by_id(parcel["CreatedByRecord"]).geometry().area(), 30000, places=3)
+        side = X.import_parcel_layer(self.fab, self.county(
+            ((0, 600, 100, 700), "12-4S-16-02962-000", ""), ((100, 600, 200, 700), "12-4S-16-02962-000", "")),
+            "Tax", None, "PIN")
+        self.assertEqual((side["copied"], side["joined"]), (1, 1))
+        beside, = [f.geometry() for f in self.fab.parcels.getFeatures() if f["ParcelNumber"] == "12-4S-16-02962-000"]
+        self.assertTrue(QgsGeometry(beside.constGet().segmentize()).isGeosValid())
+        self.assertAlmostEqual(beside.area(), 20000, places=3)
+        unnumbered = [f for f in feats if not f["ParcelNumber"]]
+        self.assertEqual([f["Name"] for f in unnumbered], [zero, zero])
+        again = X.import_parcel_layer(self.fab, self.county(*rows), "Tax", None, "PIN", "EDITED")
+        self.assertEqual(again["copied"], 0)
 
     def test_import_lots_and_subdivisions(self):
         from qgis.PyQt.QtCore import QVariant

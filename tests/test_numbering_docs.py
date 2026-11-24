@@ -44,6 +44,12 @@ def test_split_numbers_continue_from_highest():
     assert N.split_numbers([], "12-4S-16-02942-000", 1) == ["12-4S-16-02942-001"]
 
 
+def test_placeholder_numbers():
+    assert N.is_placeholder("00-00-00-00000-000")
+    for real in ("", None, "12-4S-16-02960-000", "00-00-00-00001-000", "R-000", "LAKE"):
+        assert not N.is_placeholder(real), real
+
+
 def test_split_parts_reads_the_suffix():
     assert N.split_parts("12-4S-16-02942-001") == ("12-4S-16-02942", 1)
     assert N.split_parts("02-5S-17-09063-000") == ("02-5S-17-09063", 0)

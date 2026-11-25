@@ -501,7 +501,37 @@ def open_connection(provider, name_or_path):
         if not os.path.exists(name_or_path):
             _create_empty_gpkg(name_or_path)
         return md.createConnection(name_or_path, {})
-    return md.createConnection(name_or_path)
+    conn = md.createConnection(name_or_path)
+    if provider == "mssql":
+        _ensure_mssql_geometry_columns(conn)
+    return conn
+
+
+def _ensure_mssql_geometry_columns(conn):
+    """QGIS finds spatial tables on SQL Server by querying an OGC-style
+    ``geometry_columns`` table first, falling back to scanning
+    ``sys.columns`` for geometry/geography types - but as one UNION query,
+    so a database that was never set up with a ``geometry_columns`` table
+    (a plain new database, not one made by ArcSDE or similar) fails the
+    whole query outright: "Invalid object name 'geometry_columns'" on
+    something as simple as checking whether a table exists yet. An empty
+    one satisfies that half of the query; the ``sys.columns`` scan still
+    finds this plugin's own tables the normal way. Never blocks fabric
+    creation on its own: if this fails (no permission, say), the real
+    operation that follows raises its own, clearer error instead.
+    """
+    try:
+        conn.executeSql(
+            "IF OBJECT_ID('dbo.geometry_columns', 'U') IS NULL "
+            "CREATE TABLE dbo.geometry_columns ("
+            "f_table_catalog sysname NOT NULL, f_table_schema sysname NOT NULL, "
+            "f_table_name sysname NOT NULL, f_geometry_column sysname NOT NULL, "
+            "coord_dimension int NOT NULL, srid int NOT NULL, geometry_type varchar(30) NOT NULL)")
+    except Exception as e:
+        from qgis.core import Qgis, QgsMessageLog
+        QgsMessageLog.logMessage(
+            "Could not create geometry_columns (needs CREATE TABLE permission in this "
+            "database): %s" % e, "Parcel Fabric", Qgis.MessageLevel.Warning)
 
 
 def _create_empty_gpkg(path):

@@ -203,8 +203,12 @@ def neighbor_issues(items, tol, progress=None):
     stacked units on the same land are not compared.
 
     shortcut: a gap wider than max(tol*50, 1 map unit) is left alone (a road,
-    not a sliver). Shared-boundary GEOS noise under max(tol*tol, 1e-4) is not
-    an overlap.
+    not a sliver). An intersection whose own average width (area / half its
+    perimeter - the width of the thin sliver it is, if it is one) is within
+    the snap tolerance is not an overlap either: that is two boundaries
+    digitized a hair apart along a real shared edge, the same "close enough"
+    Align Edge and the rest of the fabric already treat as coincident, not
+    two parcels actually covering the same ground.
     """
     from qgis.core import QgsFeature, QgsSpatialIndex
 
@@ -245,8 +249,11 @@ def neighbor_issues(items, tol, progress=None):
             if (stack or ostack) and smaller > 0 and ia >= 0.99 * smaller:
                 continue
             if ia > area_min:
-                p = geom.pointOnSurface().asPoint()
-                out.append(("error", "%s overlaps %s" % (name, oname), p.x(), p.y()))
+                perim = inter.length()
+                avg_width = (ia / (perim / 2.0)) if perim > 0 else None
+                if avg_width is None or avg_width > tol:
+                    p = geom.pointOnSurface().asPoint()
+                    out.append(("error", "%s overlaps %s" % (name, oname), p.x(), p.y()))
                 continue
             if stack or ostack:
                 continue

@@ -170,7 +170,7 @@ class SplitWindow(_EditWindow):
     def __init__(self, iface, manager, parent=None):
         super().__init__(iface, manager, parent)
         self.cut = None
-        self.tool = DrawLineTool(self.canvas, lambda: self.manager.active)
+        self.tool = DrawLineTool(self.canvas, lambda: self.manager.active, self._target_geometry)
         self.tool.finished.connect(self._drawn)
         row = QHBoxLayout()
         draw = QPushButton("Draw Cut Line")
@@ -179,15 +179,27 @@ class SplitWindow(_EditWindow):
         row.addWidget(draw)
         row.addWidget(self.cut_lbl, 1)
         self.lay.addLayout(row)
-        tip = QLabel("The line snaps to fabric points. Where it crosses a boundary line, that line "
-                     "is split in two (the old one is retired). Points along it become corners.\n\n"
-                     "To split by a deed's calls, enter or paste them in Traverse, select the parent "
-                     "parcel, and press Split Selected Parcel there.")
+        tip = QLabel("Select the parcel FIRST, then Draw Cut Line: both ends of the line must land on "
+                     "that parcel's own boundary (anywhere along a side, not only at an existing corner "
+                     "- click near the edge and it snaps onto it).\n\n"
+                     "A straight line all the way across makes two pieces. To cut a square or a section "
+                     "out of one side instead, click several points: start on the boundary, go in and "
+                     "around the piece you're cutting off, and end back on the boundary (right-click to "
+                     "finish) - the piece is bounded by your clicks on one side and the parcel's own edge "
+                     "on the other.\n\n"
+                     "Where the line crosses a boundary line, that line is split in two (the old one is "
+                     "retired). Points along it become corners.\n\n"
+                     "To split by a deed's calls instead, enter or paste them in Traverse, select the "
+                     "parent parcel, and press Split Selected Parcel there.")
         tip.setWordWrap(True)
         tip.setStyleSheet("color: palette(mid);")
         self.lay.addWidget(tip)
         self.keep = _remainder_choice(self.lay)
         self._finish_ui()
+
+    def _target_geometry(self):
+        sel = self.selected()
+        return sel[0].geometry() if len(sel) == 1 else None
 
     def _drawn(self, pts):
         self.cut = QgsGeometry.fromPolylineXY(pts)

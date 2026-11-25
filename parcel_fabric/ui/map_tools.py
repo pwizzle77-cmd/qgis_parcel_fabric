@@ -57,18 +57,23 @@ class PickPointTool(QgsMapTool):
 
 
 class DrawLineTool(QgsMapTool):
-    """Click points to draw a line (snaps to fabric points, then to your
-    snapping settings).  Right-click or double-click finishes, Backspace
-    removes the last point, Esc cancels.  Emits ``finished(list of
-    QgsPointXY in fabric CRS)``."""
+    """Click points to draw a line (snaps to fabric points, then to the
+    target geometry's own boundary, then to your snapping settings).
+    Right-click or double-click finishes, Backspace removes the last point,
+    Esc cancels.  Emits ``finished(list of QgsPointXY in fabric CRS)``."""
 
     finished = pyqtSignal(list)
 
-    def __init__(self, canvas, fabric_getter):
+    def __init__(self, canvas, fabric_getter, geom_getter=None):
         super().__init__(canvas)
         from qgis.gui import QgsRubberBand
         from qgis.PyQt.QtGui import QColor
         self._fabric = fabric_getter
+        # Optional: the geometry (e.g. the selected parcel) a cut must start
+        # and end on. A click near its edge, not just an existing corner,
+        # then lands exactly on the boundary instead of a hair's-width off -
+        # which a "from edge to edge" check would otherwise always reject.
+        self._geom = geom_getter
         self.indicator = QgsSnapIndicator(canvas)
         self.band = QgsRubberBand(canvas, Qgis.GeometryType.Line)
         self.band.setColor(QColor(200, 0, 120))
@@ -87,6 +92,11 @@ class DrawLineTool(QgsMapTool):
             hit = fab.find_point(p.x(), p.y(), tol=max(tol, fab.tolerance))
             if hit is not None:
                 return xf.transform(hit.geometry().asPoint(), Qgis.TransformDirection.Reverse)
+            geom = self._geom() if self._geom is not None else None
+            if geom is not None and not geom.isNull():
+                sq_dist, pt, *_ = geom.closestSegmentWithContext(p)
+                if sq_dist is not None and sq_dist >= 0 and sq_dist ** 0.5 <= tol:
+                    return xf.transform(pt, Qgis.TransformDirection.Reverse)
         m = self.canvas().snappingUtils().snapToMap(mp)
         self.indicator.setMatch(m)
         return m.point() if m.isValid() else mp

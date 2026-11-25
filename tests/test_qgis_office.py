@@ -60,6 +60,13 @@ class NeighborTests(unittest.TestCase):
         self.assertEqual(both, [])
         other = neighbor_issues([("a", "Tax", "", a), ("b", "Lot", "", box(5, 0, 15, 10))], 0.01)
         self.assertEqual(other, [])
+        # a shared edge digitized a hair apart (well inside tolerance) is a sliver, not an overlap -
+        # Align Edge and the rest of the fabric already treat this as the same line.
+        sliver = neighbor_issues([("a", "Tax", "", a), ("b", "Tax", "", box(9.995, 0, 20, 10))], 0.01)
+        self.assertEqual(sliver, [])
+        # the same offset, but a genuine overlap once it's wide enough to matter, is still caught.
+        wide = neighbor_issues([("a", "Tax", "", a), ("b", "Tax", "", box(9.5, 0, 20, 10))], 0.01)
+        self.assertTrue(any(sev == "error" and "overlap" in msg for sev, msg, _x, _y in wide))
 
     def test_fit_gap_catches_a_joined_bend(self):
         straight = box(0, 0, 100, 100)

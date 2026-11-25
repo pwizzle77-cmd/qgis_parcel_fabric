@@ -47,6 +47,7 @@ class HistoryDialog(QDialog):
         self.resize(560, 600)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.members, self.gen, self.steps, self.focus = set(), {}, [], None
+        self.truncated = False
         self._hidden_nodes = []
 
         lay = QVBoxLayout(self)
@@ -142,18 +143,21 @@ class HistoryDialog(QDialog):
 
     # ------------------------------------------------------------------
     def _all_edges(self, gids, up):
-        edges = []
+        edges, truncated = [], False
         for g in gids:
-            edges += L.walk(self.fabric, g, up=up, limit=2000)
-        return list(dict.fromkeys(edges))
+            e, t = L.walk(self.fabric, g, up=up, limit=2000)
+            edges += e
+            truncated = truncated or t
+        return list(dict.fromkeys(edges)), truncated
 
     def show_family(self, gid):
         self._stop()
         L.clear_cache()
         self.focus = gid
-        up = self._all_edges([gid], True)
+        up, up_trunc = self._all_edges([gid], True)
         roots = F.roots(up, gid) if self.whole.isChecked() else {gid}
-        down = self._all_edges(roots, False)
+        down, down_trunc = self._all_edges(roots, False)
+        self.truncated = up_trunc or down_trunc
         edges = list(dict.fromkeys(up + down))
         self.members = F.descendants(down, roots) | (F.roots(up, gid) if self.whole.isChecked() else set())
         self.members |= {gid}
@@ -177,8 +181,10 @@ class HistoryDialog(QDialog):
         i = L.parcel_info(self.fabric, gid)
         n_gen = (max(self.gen.values()) + 1) if self.gen else 1
         self.head.setText("<b>%s</b> %s &nbsp;<span style='color:gray'>%d parcels, %d generation(s), %d step(s)"
-                          "</span>" % (i["number"] or "(no number)", html.escape(i["name"]),
-                                       len(self.members), n_gen, len(steps)))
+                          "</span>%s" % (i["number"] or "(no number)", html.escape(i["name"]),
+                                       len(self.members), n_gen, len(steps),
+                                       "<br><span style='color:#a00'>INCOMPLETE: this family is larger "
+                                       "than shown.</span>" if self.truncated else ""))
         self.list.blockSignals(True)
         self.list.clear()
         for s in steps:
@@ -366,6 +372,9 @@ class HistoryDialog(QDialog):
                 img = '<img src="%s/%s" alt="map on %s">' % (html.escape(os.path.basename(folder)), fn, s["date"])
             rows.append(self._handout_row(s, img))
         i = L.parcel_info(self.fabric, self.focus)
+        warn = ('<p style="color:#a00;font-weight:bold;border:1px solid #a00;padding:6px 10px">'
+               "INCOMPLETE: this family has more history than fits here; not every step is "
+               "listed below.</p>") if self.truncated else ""
         page = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>History of %s</title>
 <style>body{font-family:Arial,sans-serif;margin:28px;color:#222;max-width:900px}
 h1{font-size:20px;margin-bottom:4px} .m{color:#666;font-size:12px}
@@ -373,10 +382,10 @@ h1{font-size:20px;margin-bottom:4px} .m{color:#666;font-size:12px}
 .step h2{font-size:15px;margin:0 0 6px} table{border-collapse:collapse;font-size:13px;margin:6px 0}
 td,th{border:1px solid #ddd;padding:3px 8px;text-align:left} img{max-width:100%%;border:1px solid #ccc}
 </style></head><body><h1>Parcel history: %s</h1>
-<p class=m>%s &middot; %d parcels in the family &middot; prepared %s</p>%s</body></html>""" % (
+<p class=m>%s &middot; %d parcels in the family &middot; prepared %s</p>%s%s</body></html>""" % (
             html.escape(i["number"] or ""), html.escape(i["number"] or i["name"] or ""),
             html.escape(i["name"] or ""), len(self.members), datetime.date.today().isoformat(),
-            "".join(rows))
+            warn, "".join(rows))
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(page)
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))

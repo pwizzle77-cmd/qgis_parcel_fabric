@@ -420,25 +420,35 @@ def _dates(fabric, records):
 
 
 def update_record_footprint(fabric, record_gid, ed):
-    """Record polygon = union of the parcels it created; ParcelCount."""
+    """Record polygon = union of the parcels it created; ParcelCount.
+
+    Also fills the record's own Parcel ID from the parcel it created, when
+    the record was filed before a parcel id existed (a new plat or deed)
+    and it still has none: only when every parcel it created shares one id,
+    so a multi-lot plat is left for the roll ID to be typed on each lot.
+    """
     rec = fabric.record_by_id(record_gid)
     if rec is None:
         return
-    geoms, count = [], 0
+    geoms, count, ids = [], 0, []
     expr = '"CreatedByRecord" = \'%s\' AND %s' % (record_gid.replace("'", "''"), CURRENT)
     for f in fabric.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(expr)):
         if f["IsSeed"] == 1:
             continue
         g = f.geometry()
-        if g.isNull():
-            continue
-        geoms.append(QgsGeometry(g.constGet().segmentize()))
+        if not g.isNull():
+            geoms.append(QgsGeometry(g.constGet().segmentize()))
         count += 1
+        pid = f["ParcelID"] or f["ParcelNumber"]
+        if pid:
+            ids.append(str(pid))
     if geoms:
         u = QgsGeometry.unaryUnion(geoms)
         u.convertToMultiType()
         ed.set_geometry(fabric.records, rec.id(), u)
     ed.change(fabric.records, rec.id(), "ParcelCount", count)
+    if rec.fields().indexOf("QPF_ParcelID") >= 0 and not rec["QPF_ParcelID"] and len(set(ids)) == 1:
+        ed.change(fabric.records, rec.id(), "QPF_ParcelID", ids[0][:30])
 
 
 def _snap_ends(lines, tol):

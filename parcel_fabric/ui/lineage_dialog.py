@@ -22,6 +22,7 @@ class LineageDialog(QDialog):
         self.manager = manager
         self.fabric = manager.active
         self.gid = None
+        self.truncated = False
         self.setWindowTitle("Parcel Lineage")
         self.resize(560, 520)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -84,8 +85,12 @@ class LineageDialog(QDialog):
         self.head.setText("<b>%s</b> %s &nbsp; <span style='color:gray'>%s, created by %s%s</span>" % (
             i["number"] or "(no number)", i["name"], i["type"], i["record"] or "?",
             ", retired" if i["retired"] else ""))
-        self.up = L.walk(self.fabric, gid, up=True)
-        self.down = L.walk(self.fabric, gid, up=False)
+        self.up, up_trunc = L.walk(self.fabric, gid, up=True)
+        self.down, down_trunc = L.walk(self.fabric, gid, up=False)
+        self.truncated = up_trunc or down_trunc
+        if self.truncated:
+            self.head.setText(self.head.text() + "<br><span style='color:#a00'>INCOMPLETE: this "
+                              "parcel's history is larger than shown below.</span>")
         self.tree.clear()
         for title, edges, up in (("Came from", self.up, True), ("Became", self.down, False)):
             top = QTreeWidgetItem([title + (" (none)" if not edges else ""), "", ""])
@@ -131,17 +136,17 @@ class LineageDialog(QDialog):
     def _csv(self):
         p = self._ask("Export lineage", "CSV (*.csv)")
         if p:
-            L.export_csv(self.fabric, self.up + self.down, p)
+            L.export_csv(self.fabric, self.up + self.down, p, self.truncated)
 
     def _dot(self):
         p = self._ask("Export lineage chart", "GraphViz (*.dot)")
         if p:
-            L.export_dot(self.fabric, self.up + self.down, p, self.gid)
+            L.export_dot(self.fabric, self.up + self.down, p, self.gid, self.truncated)
 
     def _html(self):
         p = self._ask("Printable lineage", "Web page (*.html)")
         if p:
-            L.export_html(self.fabric, self.gid, self.up, self.down, p)
+            L.export_html(self.fabric, self.gid, self.up, self.down, p, self.truncated)
             from qgis.PyQt.QtCore import QUrl
             from qgis.PyQt.QtGui import QDesktopServices
             QDesktopServices.openUrl(QUrl.fromLocalFile(p))

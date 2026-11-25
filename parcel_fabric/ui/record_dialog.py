@@ -191,11 +191,12 @@ class RecordDialog(QDialog):
     def store_document(self, gid):
         """Copy a newly attached file into the document folder.
 
-        Returns the path to save on the record (unchanged if no folder is set).
+        Returns ``(path, sha256)`` to save on the record (the path unchanged,
+        and no hash, if no folder is set).
         """
         root, fpat, npat = self._doc_settings()
         if not self.doc_src or not root:
-            return self.doc.text().strip()
+            return self.doc.text().strip(), None
         v = self.values()
         vals = D.record_values(v["name"], v["rtype"], v["book"], v["page"], v["date"], gid)
         return D.store(self.doc_src, root, fpat, npat, vals)
@@ -203,7 +204,7 @@ class RecordDialog(QDialog):
     def rename_existing(self, gid):
         """After an edit: move a stored document to the name the record now calls for.
 
-        Returns the new path, or None when nothing should change.
+        Returns ``(new_path, sha256)``, or None when nothing should change.
         """
         root, fpat, npat = self._doc_settings()
         path = self.doc.text().strip()

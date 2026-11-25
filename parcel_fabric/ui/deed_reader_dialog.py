@@ -470,16 +470,16 @@ class DeedReaderDialog(QDialog):
             return            # never replace a document that's already attached
         from ..core import documents as D
         root = fab.settings.get("doc_root", "")
-        new = path
+        new, new_hash = path, None
         if root:
             v = fab.record_values(rec)
             vals = D.record_values(v["name"], v["rtype"], v["book"], v["page"], v["date"], gid)
             try:
-                new = D.store(path, root, fab.settings.get("doc_folder_pattern") or D.DEFAULT_FOLDER,
-                              fab.settings.get("doc_name_pattern") or D.DEFAULT_NAME, vals)
+                new, new_hash = D.store(path, root, fab.settings.get("doc_folder_pattern") or D.DEFAULT_FOLDER,
+                                        fab.settings.get("doc_name_pattern") or D.DEFAULT_NAME, vals)
             except (OSError, ValueError):
-                new = path
-        fab.update_record(gid, doc_url=new)
+                new, new_hash = path, None
+        fab.update_record(gid, doc_url=new, doc_hash=new_hash)
 
 
 def _describe(c):

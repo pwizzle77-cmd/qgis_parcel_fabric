@@ -66,12 +66,17 @@ def clear_cache():
 
 
 def walk(fabric, gid, up=True, limit=200):
-    """Edges (parent gid, child gid, operation, record gid) reachable from ``gid``.
+    """Edges (parent gid, child gid, operation, record gid) reachable from ``gid``,
+    and whether ``limit`` cut the search short (there may be more history than shown).
 
     ``up`` walks to ancestors, otherwise to descendants.
     """
     edges, seen, todo = [], {gid}, [gid]
-    while todo and len(edges) < limit:
+    truncated = False
+    while todo:
+        if len(edges) >= limit:
+            truncated = True
+            break
         cur = todo.pop(0)
         for r in _rows(fabric, "ChildID" if up else "ParentID", cur):
             e = (r["ParentID"], r["ChildID"], r["Operation"], r["RecordID"])
@@ -80,7 +85,7 @@ def walk(fabric, gid, up=True, limit=200):
             if nxt not in seen:
                 seen.add(nxt)
                 todo.append(nxt)
-    return edges
+    return edges, truncated
 
 
 def label(fabric, gid):
@@ -94,21 +99,27 @@ def record_name(fabric, gid):
     return (rec["Name"] if rec is not None else "") or ""
 
 
-def export_csv(fabric, edges, path):
+def export_csv(fabric, edges, path, truncated=False):
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
+        if truncated:
+            w.writerow(["# INCOMPLETE: this parcel's history is larger than shown here; "
+                        "not every ancestor or descendant is listed."])
         w.writerow(["ParentNumber", "ChildNumber", "Operation", "Record", "ParentID", "ChildID"])
         for p, c, op, rec in edges:
             w.writerow([parcel_info(fabric, p)["number"], parcel_info(fabric, c)["number"], op,
                         record_name(fabric, rec), p, c])
 
 
-def export_dot(fabric, edges, path, focus=None):
+def export_dot(fabric, edges, path, focus=None, truncated=False):
     """GraphViz DOT file (open with GraphViz, or paste into an online viewer)."""
     nodes = {g for e in edges for g in e[:2]}
     if focus:
         nodes.add(focus)
     lines = ["digraph lineage {", '  rankdir=TB; node [shape=box, fontname="Arial"];']
+    if truncated:
+        lines.append('  label="INCOMPLETE: more history exists than is shown here"; '
+                     'labelloc=t; fontcolor=red;')
     for g in sorted(nodes):
         i = parcel_info(fabric, g)
         style = ', style="filled", fillcolor="#fff2a8"' if g == focus else \
@@ -122,7 +133,7 @@ def export_dot(fabric, edges, path, focus=None):
         fh.write("\n".join(lines))
 
 
-def export_html(fabric, gid, up_edges, down_edges, path):
+def export_html(fabric, gid, up_edges, down_edges, path, truncated=False):
     """A printable page: ancestors and descendants as indented lists."""
     def tree(root, edges, up):
         kids = {}
@@ -144,13 +155,16 @@ def export_html(fabric, gid, up_edges, down_edges, path):
         body = "".join(item(root, 0, {root}))
         return "<ul>%s</ul>" % body if body else "<p class=m>None recorded.</p>"
     i = parcel_info(fabric, gid)
+    warn = ('<p style="color:#a00;font-weight:bold;border:1px solid #a00;padding:6px 10px">'
+           "INCOMPLETE: this parcel's history is larger than fits here; not every ancestor "
+           "or descendant is listed.</p>") if truncated else ""
     page = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Lineage %s</title>
 <style>body{font-family:Arial,sans-serif;margin:32px;color:#222} h1{font-size:20px}
 h2{font-size:15px;margin-top:24px} li{margin:4px 0} .m{color:#666;font-size:12px}</style></head><body>
-<h1>Parcel lineage: %s</h1><p class=m>%s &middot; %s &middot; created by %s &middot; printed %s</p>
+<h1>Parcel lineage: %s</h1><p class=m>%s &middot; %s &middot; created by %s &middot; printed %s</p>%s
 <h2>Came from (parents)</h2>%s<h2>Became (children)</h2>%s</body></html>""" % (
         html.escape(i["number"]), html.escape(i["number"] or gid), html.escape(i["name"]),
         html.escape(i["type"]), html.escape(i["record"]),
-        datetime.date.today().isoformat(), tree(gid, up_edges, True), tree(gid, down_edges, False))
+        datetime.date.today().isoformat(), warn, tree(gid, up_edges, True), tree(gid, down_edges, False))
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(page)

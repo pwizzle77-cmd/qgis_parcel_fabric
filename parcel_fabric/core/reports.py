@@ -8,11 +8,13 @@ import math
 from qgis.core import QgsFeatureRequest, QgsGeometry, QgsPointXY
 from qgis.PyQt.QtCore import QUrl
 
+from . import lineage as L
 from . import units as U
 from .build import _ends, _single_curve
 from .cogo import CURVE, Course, loop_misclose
 from .fabric import CURRENT, Fabric, quote, type_expr
 from .geomio import parts_of
+from .parcel_numbers import unfiltered
 from .topo import chain_ring
 
 
@@ -159,3 +161,157 @@ table{border-collapse:collapse;font-size:13px}td,th{border:1px solid #ddd;paddin
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(page)
     return len(parcels)
+
+
+# --------------------------------------------------------------------------
+# Parcel Report: a one-page, counter/citizen handout for a single parcel.
+# Not a legal survey document - the closure report and Parcel Lineage tool
+# remain the authoritative ones; this just puts the common facts on one page.
+# --------------------------------------------------------------------------
+def _footprint_svg(parts, size=280, pad=16):
+    """An SVG sketch of polygon exterior rings ``[[(x, y), ...], ...]``,
+    normalized to fit a ``size``x``size`` box. Pure arithmetic and string
+    building - no QGIS types, so this is unit-testable on its own."""
+    pts = [p for ring in parts for p in ring]
+    if not pts:
+        return ""
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    w, h = maxx - minx, maxy - miny
+    if w <= 0 or h <= 0:
+        return ""
+    scale = (size - 2 * pad) / max(w, h)
+
+    def sx(x):
+        return pad + (x - minx) * scale
+
+    def sy(y):      # SVG y grows downward; map y grows north, so flip it
+        return size - pad - (y - miny) * scale
+
+    polys = []
+    for ring in parts:
+        if len(ring) < 3:
+            continue
+        pts_txt = " ".join("%.1f,%.1f" % (sx(x), sy(y)) for x, y in ring)
+        polys.append('<polygon points="%s" fill="#dce8f7" stroke="#1f5fa8" stroke-width="1.5"/>' % pts_txt)
+    if not polys:
+        return ""
+    return ('<svg viewBox="0 0 %d %d" width="%d" height="%d" xmlns="http://www.w3.org/2000/svg">%s</svg>'
+           % (size, size, size, size, "".join(polys)))
+
+
+def _ring_coords(poly_geom):
+    """[(x, y), ...] of one polygon part's exterior ring, curves flattened."""
+    seg = QgsGeometry(poly_geom.constGet().segmentize())
+    ring = QgsGeometry(seg.constGet().exteriorRing().clone())
+    return [(pt.x(), pt.y()) for pt in ring.asPolyline()]
+
+
+def _record_line(fabric, record_gid, verb):
+    if not record_gid:
+        return ""
+    rec = fabric.record_by_id(record_gid)
+    if rec is None:
+        return ""
+    d = rec["RecordedDate"]
+    dtxt = d.toString("yyyy-MM-dd") if hasattr(d, "toString") and d else ""
+    bits = [html.escape(str(rec["RecordType"] or "Record")), html.escape(str(rec["Name"] or ""))]
+    if rec["Book"] or rec["Page"]:
+        bits.append("Book %s, Page %s" % (html.escape(str(rec["Book"] or "-")),
+                                          html.escape(str(rec["Page"] or "-"))))
+    if dtxt:
+        bits.append("recorded %s" % dtxt)
+    return "<p><b>%s by:</b> %s</p>" % (verb, " &middot; ".join(b for b in bits if b))
+
+
+def _lineage_summary(fabric, gid):
+    """One level of lineage only; the Parcel Lineage tool has the full tree."""
+    def side(field):
+        req = QgsFeatureRequest().setFilterExpression('"%s" = %s' % (field, quote(gid)))
+        return list(fabric.lineage.getFeatures(req))
+
+    def rows(recs, other_field):
+        out = []
+        for r in recs:
+            other = r[other_field]
+            i = L.parcel_info(fabric, other)
+            out.append("<li>%s %s <span class=m>(%s, by %s)</span></li>" % (
+                html.escape(i["number"] or "(no number)"), html.escape(i["name"] or ""),
+                html.escape(r["Operation"] or ""), html.escape(L.record_name(fabric, r["RecordID"]))))
+        return "".join(out)
+
+    parents = rows(side("ChildID"), "ParentID")
+    children = rows(side("ParentID"), "ChildID")
+    out = ""
+    if parents:
+        out += "<p><b>Came from:</b></p><ul>%s</ul>" % parents
+    if children:
+        out += "<p><b>Became:</b></p><ul>%s</ul>" % children
+    return out
+
+
+def parcel_report_html(fabric, parcel_gid, path):
+    """A one-page report for one parcel: identification, area, the record
+    that created (and, if retired, replaced) it, one level of lineage, and
+    a footprint sketch. Returns the parcel's own label."""
+    req = QgsFeatureRequest().setFilterExpression('"GlobalID" = %s' % quote(parcel_gid))
+    p = next(iter(unfiltered(fabric.parcels).getFeatures(req)), None)
+    if p is None:
+        raise ValueError("Parcel not found")
+    number = str(p["ParcelNumber"] or p["Name"] or parcel_gid)
+    bits = [html.escape(str(p["ParcelType"] or ""))]
+    if p["Subdivision"]:
+        bits.append("Subdivision %s" % html.escape(str(p["Subdivision"])))
+    if p["Block"]:
+        bits.append("Block %s" % html.escape(str(p["Block"])))
+    if p["Lot"]:
+        bits.append("Lot %s" % html.escape(str(p["Lot"])))
+    subtitle = " &middot; ".join(b for b in bits if b)
+
+    area_bits = []
+    try:
+        ca = float(p["CalculatedArea"])
+        area_bits.append("%.3f ac (%s sq ft) by coordinates" % (ca / 43560.0, "{:,.0f}".format(ca)))
+    except (TypeError, ValueError):
+        pass
+    try:
+        st, unit = float(p["StatedArea"]), int(p["StatedAreaUnit"] or 1)
+        area_bits.append("%.3f ac stated" % (st if unit == 2 else st / 43560.0))
+    except (TypeError, ValueError):
+        pass
+    try:
+        mr = float(p["MiscloseRatio"])
+        if mr > 0:
+            area_bits.append("precision %s" % _ratio_text(mr))
+    except (TypeError, ValueError):
+        pass
+    area_html = "<p><b>Area:</b> %s</p>" % " &middot; ".join(area_bits) if area_bits else ""
+
+    status_html = ""
+    if p["RetiredByRecord"]:
+        status_html = ('<p style="color:#a00;font-weight:bold">This parcel is no longer current.</p>'
+                       + _record_line(fabric, p["RetiredByRecord"], "Retired"))
+
+    svg = ""
+    try:
+        rings = [_ring_coords(part) for part in parts_of(p.geometry())]
+        svg = _footprint_svg(rings)
+    except Exception:
+        svg = ""   # the report is still useful without the sketch
+
+    page = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Parcel %s</title>
+<style>body{font-family:Arial,sans-serif;margin:28px;color:#222;max-width:720px}
+h1{font-size:22px;margin-bottom:2px} .sub{color:#666;margin-top:0}
+.m{color:#666;font-size:12px} li{margin:3px 0}
+.wrap{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}
+.col{flex:1;min-width:280px}</style></head><body>
+<h1>Parcel %s</h1><p class=sub>%s</p>%s
+<div class=wrap><div class=col>%s%s%s</div><div>%s</div></div>
+<p class=m>Prepared %s. This is a summary for reference, not a legal survey document - see the
+full Parcel Lineage and Closure Report tools for the complete record.</p></body></html>""" % (
+        html.escape(number), html.escape(number), subtitle, status_html,
+        area_html, _record_line(fabric, p["CreatedByRecord"], "Created"),
+        _lineage_summary(fabric, parcel_gid), svg, datetime.date.today().isoformat())
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    return number

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Records panel: pick the fabric, create records, set the active record, build."""
 
+import os
+
 from qgis.core import QgsCoordinateTransform, QgsFeatureRequest, QgsProject
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QFont
@@ -280,7 +282,8 @@ class RecordsDock(QDockWidget):
         try:
             gid = fab.create_record(**v)
             if dlg.doc_src:
-                fab.update_record(gid, doc_url=dlg.store_document(gid))
+                path, doc_hash = dlg.store_document(gid)
+                fab.update_record(gid, doc_url=path, doc_hash=doc_hash)
         except Exception as e:
             QMessageBox.critical(self, "New Record", str(e))
             return
@@ -303,11 +306,11 @@ class RecordsDock(QDockWidget):
         v = dlg.values()
         try:
             if dlg.doc_src:
-                v["doc_url"] = dlg.store_document(gid)
+                v["doc_url"], v["doc_hash"] = dlg.store_document(gid)
             else:
                 moved = dlg.rename_existing(gid)
                 if moved:
-                    v["doc_url"] = moved
+                    v["doc_url"], v["doc_hash"] = moved
             fab.update_record(gid, **v)
         except Exception as e:
             QMessageBox.critical(self, "Edit Record", str(e))
@@ -327,7 +330,18 @@ class RecordsDock(QDockWidget):
         if not path:
             QMessageBox.information(self, "Document", "This record has no document. Use Edit... to attach one.")
             return
-        open_document(self, str(path))
+        path = str(path)
+        expected = rec["QPF_DocumentHash"] if rec.fields().indexOf("QPF_DocumentHash") >= 0 else None
+        if expected and os.path.isfile(path):
+            from ..core import documents as D
+            if not D.verify(path, expected):
+                if QMessageBox.warning(self, "Document",
+                        "This file no longer matches what was filed with this record "
+                        "(it may have been edited or replaced since).\n\n%s\n\nOpen it anyway?" % path,
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                    return
+        open_document(self, path)
 
     def _closure_report(self):
         fab = self.manager.active

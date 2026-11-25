@@ -7,6 +7,7 @@ Folder pattern example ``{type}/Book {book}`` and file pattern
 ``{type}_B{book}_P{page}`` give ``Plat/Book 5/Plat_B5_P22.pdf``.
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -74,11 +75,29 @@ def is_inside(path, root):
         return False
 
 
+def sha256_file(path, chunk_size=1 << 20):
+    """The file's SHA-256 hex digest, or None if it can't be read.
+
+    Recorded at filing time so a later check can tell whether a stored
+    plat or deed scan still matches what was originally attached.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(chunk_size), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
 def store(src, root, folder_pattern, name_pattern, values, move=False):
-    """Copy (or move) ``src`` into the document store. Returns the new path.
+    """Copy (or move) ``src`` into the document store. Returns ``(path, sha256)``.
 
     Folders are created as needed and an existing file is never
     overwritten.  If ``src`` is already the target, nothing happens.
+    The hash is of the file at its final location, so it covers what was
+    actually filed even when the copy itself is somehow altered in transit.
     """
     if not root:
         raise ValueError("No document folder is set (Fabric Settings).")
@@ -87,14 +106,26 @@ def store(src, root, folder_pattern, name_pattern, values, move=False):
     ext = os.path.splitext(src)[1]
     target = target_for(root, folder_pattern, name_pattern, values, ext)
     if os.path.normcase(os.path.abspath(src)) == os.path.normcase(os.path.abspath(target)):
-        return target
+        return target, sha256_file(target)
     target = unique(target)
     os.makedirs(os.path.dirname(target), exist_ok=True)
     if move:
         shutil.move(src, target)
     else:
         shutil.copy2(src, target)
-    return target
+    return target, sha256_file(target)
+
+
+def verify(path, expected_hash):
+    """True if ``path`` still hashes to ``expected_hash``.
+
+    False (not an exception) when the file is missing or unreadable, or no
+    hash was recorded for it (older records, or ``expected_hash`` is empty) -
+    callers tell that apart from a genuine mismatch by checking ``expected_hash`` first.
+    """
+    if not expected_hash:
+        return False
+    return sha256_file(path) == expected_hash
 
 
 def record_values(name="", rtype="", book="", page="", date=None, gid=""):

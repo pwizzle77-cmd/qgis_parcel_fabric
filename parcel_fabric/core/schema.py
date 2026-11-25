@@ -60,6 +60,8 @@ def new_guid():
 _COMMON_TAIL = [
     ("CreatedByRecord", STR, GUID_LEN, "Created by record"),
     ("RetiredByRecord", STR, GUID_LEN, "Retired by record"),
+    ("CreatedByUser", STR, 100, "Created by user"),
+    ("RetiredByUser", STR, 100, "Retired by user"),
 ]
 
 RECORD_FIELDS = [
@@ -72,10 +74,12 @@ RECORD_FIELDS = [
     ("QPF_ParcelID", STR, 30, "Parcel ID"),
     ("ParcelCount", INT, 0, "Parcel count"),
     ("QPF_DocumentURL", STR, 1024, "Document link"),
+    ("QPF_DocumentHash", STR, 64, "Document SHA-256"),
     ("QPF_BasisOfBearing", STR, 255, "Basis of bearing"),
     ("QPF_ScaleFactor", DBL, 0, "Ground to grid scale"),
     ("QPF_Rotation", DBL, 0, "Ground to grid rotation (deg)"),
     ("QPF_Notes", STR, 1024, "Notes"),
+    ("CreatedByUser", STR, 100, "Created by user"),
 ]
 
 POINT_FIELDS = [
@@ -167,6 +171,7 @@ LINEAGE_FIELDS = [
     ("ChildNumber", STR, 30, "Child number"),
     ("ParcelType", STR, 50, "Parcel type"),
     ("EditDate", STR, 20, "Edit date"),
+    ("EditUser", STR, 100, "Edited by user"),
 ]
 
 SETTINGS_FIELDS = [
@@ -227,7 +232,36 @@ DEFAULT_SETTINGS = {
     "number_separator": "-",
     "number_split_digits": "3",
     "number_parent_suffix": "000",
+    # which plugin version created this fabric, and last opened it (diagnostics only)
+    "schema_created_version": "",
+    "schema_updated_version": "",
 }
+
+
+def plugin_version():
+    """This plugin's version, from metadata.txt (for the fabric's version settings)."""
+    import configparser
+    cfg = configparser.ConfigParser()
+    cfg.read(os.path.join(os.path.dirname(__file__), os.pardir, "metadata.txt"), encoding="utf-8")
+    try:
+        return cfg["general"]["version"]
+    except KeyError:
+        return "unknown"
+
+
+def _version_tuple(v):
+    out = []
+    for p in str(v).split("."):
+        try:
+            out.append(int(p))
+        except ValueError:
+            out.append(0)
+    return tuple(out)
+
+
+def version_is_older(a, b):
+    """Whether version string ``a`` is older than ``b`` (numeric, dotted)."""
+    return _version_tuple(a) < _version_tuple(b)
 
 
 def _fields(spec):

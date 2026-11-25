@@ -81,6 +81,8 @@ class ParcelFabricPlugin:
         self._more_menu.addSeparator()
         self._more("lineage", "Parcel Lineage", lambda: self._window("lineage"),
                    "Where a parcel came from and what it became")
+        self._more("records", "Parcel Report...", lambda: self._window("parcel_report"),
+                   "A one-page handout for a parcel: area, record, lineage and a footprint sketch")
         self._more("history", "Parcel History", lambda: self._window("history"),
                    "A parcel's splits and merges on the map, step by step through time")
         self._more("legal_writer", "Write Legal Description", lambda: self._window("legal_writer"),
@@ -284,13 +286,15 @@ class ParcelFabricPlugin:
         from .ui.address_lots_dialog import AddressLotsDialog
         from .ui.exchange_dialog import ExchangeDialog
         from .ui.lineage_dialog import LineageDialog
+        from .ui.parcel_report_dialog import ParcelReportDialog
         from .ui.stack_dialog import StackDialog
         cls = {"subdivide": ED.SubdivideWindow, "address": AddressLotsDialog, "exchange": ExchangeDialog,
                "split": ED.SplitWindow, "divide": ED.DivideWindow, "merge": ED.MergeWindow,
                "separate": ED.SeparateWindow, "stack": StackDialog,
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
                "history": HistoryDialog, "legal_writer": LegalWriterDialog,
-               "compare": CompareDialog, "adjust": AdjustDialog}[kind]
+               "compare": CompareDialog, "adjust": AdjustDialog,
+               "parcel_report": ParcelReportDialog}[kind]
         w = cls(self.iface, self.manager)
         w.show()
         self._windows[kind] = w

@@ -7,6 +7,7 @@ from copy import copy
 
 from qgis.core import (
     Qgis,
+    QgsApplication,
     QgsCircularString,
     QgsCompoundCurve,
     QgsDefaultValue,
@@ -50,8 +51,8 @@ LAYER_LABELS = {S.ROLE_RECORDS: "Records", S.ROLE_POINTS: "Points",
 # record dialog key -> Records field
 RECORD_MAP = {"name": "Name", "rtype": "RecordType", "date": "RecordedDate", "book": "Book",
               "page": "Page", "parcel_id": "QPF_ParcelID", "doc_url": "QPF_DocumentURL",
-              "basis": "QPF_BasisOfBearing", "notes": "QPF_Notes", "scale": "QPF_ScaleFactor",
-              "rotation": "QPF_Rotation"}
+              "doc_hash": "QPF_DocumentHash", "basis": "QPF_BasisOfBearing", "notes": "QPF_Notes",
+              "scale": "QPF_ScaleFactor", "rotation": "QPF_Rotation"}
 
 
 def quote(v):
@@ -60,6 +61,36 @@ def quote(v):
 
 def type_expr(ptype):
     return '"ParcelType" = %s' % quote(ptype)
+
+
+def _stamp_schema_version(settings_layer, settings):
+    """Record which plugin version created/last opened this fabric.
+
+    Diagnostics only - never blocks opening the fabric, and a plugin older
+    than the one that last touched it is only logged, not refused, since
+    new fields are always additive (see ``schema.add_missing_fields``).
+    """
+    from qgis.core import Qgis, QgsMessageLog
+    try:
+        current = S.plugin_version()
+        to_write = {}
+        if not settings.get("schema_created_version"):
+            to_write["schema_created_version"] = current
+        if settings.get("schema_updated_version") != current:
+            to_write["schema_updated_version"] = current
+        if to_write:
+            S.write_settings(settings_layer, to_write)
+            settings.update(to_write)
+        last = settings.get("schema_updated_version") or ""
+        if last and S.version_is_older(current, last):
+            QgsMessageLog.logMessage(
+                "This fabric was last opened by Parcel Fabric %s; this is %s. Fields that "
+                "version added may not be recognised here." % (last, current),
+                "Parcel Fabric", Qgis.MessageLevel.Warning)
+    except Exception as e:
+        from qgis.core import Qgis, QgsMessageLog
+        QgsMessageLog.logMessage("Could not record the fabric's schema version: %s" % e,
+                                 "Parcel Fabric", Qgis.MessageLevel.Warning)
 
 
 class Fabric:
@@ -91,6 +122,7 @@ class Fabric:
         settings.setdefault("name", prefix or "Parcel Fabric")
         for k, v in S.DEFAULT_SETTINGS.items():
             settings.setdefault(k, v)
+        _stamp_schema_version(st, settings)
         st.setCustomProperty(PROP_FABRIC, fid)
         st.setCustomProperty(PROP_ROLE, S.ROLE_SETTINGS)
         layers = {S.ROLE_SETTINGS: st}
@@ -695,7 +727,29 @@ class EditSession:
             lx.beginEditCommand(self.label)
         return self
 
+    # Fields stamped with the OS login name of whoever is editing, when a
+    # layer has them and the feature doesn't already carry a value (an
+    # import can set its own CreatedByUser, e.g. who ran the import).
+    USER_FIELDS_ON_ADD = ("CreatedByUser", "EditUser")
+
+    @staticmethod
+    def _current_user():
+        try:
+            return QgsApplication.userLoginName() or ""
+        except Exception:
+            return ""
+
     def add(self, layer, feature):
+        user = self._current_user()
+        if user:
+            fields = layer.fields()
+            for name in self.USER_FIELDS_ON_ADD:
+                i = fields.indexOf(name)
+                if i < 0:
+                    continue
+                v = feature.attribute(i)
+                if v is None or v == "" or (hasattr(v, "isNull") and v.isNull()):
+                    feature.setAttribute(i, user)
         if not layer.addFeature(feature):
             raise RuntimeError("Could not add a feature to %s" % layer.name())
 
@@ -705,6 +759,14 @@ class EditSession:
             return
         if not layer.changeAttributeValue(fid, i, value):
             raise RuntimeError("Could not change %s on %s" % (field, layer.name()))
+        if field == "RetiredByRecord" and value:
+            self._stamp(layer, fid, "RetiredByUser")
+
+    def _stamp(self, layer, fid, field):
+        user = self._current_user()
+        j = layer.fields().indexOf(field)
+        if user and j >= 0:
+            layer.changeAttributeValue(fid, j, user)
 
     def set_geometry(self, layer, fid, geom):
         if not layer.changeGeometry(fid, geom):

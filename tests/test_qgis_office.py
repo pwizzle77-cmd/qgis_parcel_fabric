@@ -264,6 +264,52 @@ class OfficeTests(_Base):
         booked = [r for r in self.fab.records.getFeatures() if r["QPF_ParcelID"] == "BOOKED-1"]
         self.assertEqual(booked[0]["Book"], "5")
         self.assertEqual(booked[0]["Page"], "22")
+        sourced = QgsVectorLayer("Polygon?crs=epsg:2238", "sourced", "memory")
+        sourced.dataProvider().addAttributes([
+            QgsField("PIN", QVariant.String), QgsField("BOOK", QVariant.String),
+            QgsField("PAGE", QVariant.String), QgsField("CREATED_BY", QVariant.String),
+            QgsField("LAST_EDITED_USER", QVariant.String)])
+        sourced.updateFields()
+
+        def sourced_feat(pin, book, page, x, created="", edited=""):
+            f = QgsFeature(sourced.fields())
+            f.setGeometry(box(X0 + x, Y0 + 500, X0 + x + 40, Y0 + 540))
+            f.setAttribute("PIN", pin)
+            f.setAttribute("BOOK", book)
+            f.setAttribute("PAGE", page)
+            f.setAttribute("CREATED_BY", created)
+            f.setAttribute("LAST_EDITED_USER", edited)
+            return f
+
+        sourced.dataProvider().addFeatures([
+            sourced_feat("FIELD-1", "12", "4", 0, "ada", "bea"),
+            sourced_feat("FIELD-2", "", "", 80),
+        ])
+        notes = []
+
+        def note(_pct, text=None):
+            if text:
+                notes.append(text)
+
+        filed_fields = X.import_parcel_layer(
+            self.fab, sourced, "Tax", number_field="PIN", split_history=False,
+            book="9", page="8", book_field="BOOK", page_field="PAGE", progress=note,
+            created_field="CREATED_BY", edited_field="LAST_EDITED_USER")
+        self.assertEqual(filed_fields["copied"], 2)
+        self.assertTrue(any(t == "Creating lines: 1/2" or t == "Creating lines: 2/2" for t in notes), notes)
+        by_pid = {r["QPF_ParcelID"]: r for r in self.fab.records.getFeatures()}
+        self.assertEqual(by_pid["FIELD-1"]["Book"], "12")
+        self.assertEqual(by_pid["FIELD-1"]["Page"], "4")
+        self.assertEqual(by_pid["FIELD-2"]["Book"], "9")
+        self.assertEqual(by_pid["FIELD-2"]["Page"], "8")
+        self.assertEqual(by_pid["FIELD-1"]["CreatedByUser"], "ada")
+        self.assertEqual(by_pid["FIELD-1"]["EditUser"], "bea")
+        parcel = next(f for f in self.fab.parcels.getFeatures() if f["ParcelNumber"] == "FIELD-1")
+        self.assertEqual(parcel["CreatedByUser"], "ada")
+        self.assertEqual(parcel["EditUser"], "bea")
+        traced = [f for f in self.fab.lines.getFeatures() if f["CreatedByRecord"] == parcel["CreatedByRecord"]]
+        self.assertTrue(traced)
+        self.assertTrue(all(f["CreatedByUser"] == "ada" and f["EditUser"] == "bea" for f in traced))
         blank = X.import_parcel_layer(
             self.fab, stamped, "Tax", number_field="PIN", split_history=False)
         self.assertEqual(blank["copied"], 0)
@@ -620,32 +666,6 @@ class OfficeTests(_Base):
         self.assertEqual(sorted(f["Lot"] for f in saved), ["10", "11"])
         self.assertTrue(all(f["Subdivision"] == "OAKS" and f["Block"] == "2" for f in saved))
         self.assertTrue(all(f["ParcelNumber"] == "12-4S-16-02942-000" for f in saved))
-
-    def test_a_multipart_subdivision_splits_into_rows_on_a_single_polygon_table(self):
-        # Lots/Blocks/Subdivisions are always multi-polygon on a fabric created now (the fix for
-        # this), but an older SQL Server fabric's table may still be single-polygon-per-row -
-        # a multi-part subdivision must still import, as several same-named rows, not be skipped.
-        from qgis.PyQt.QtCore import QVariant
-        from qgis.core import QgsField
-        target = QgsVectorLayer("CurvePolygon?crs=epsg:2238", "subdivisions", "memory")
-        target.dataProvider().addAttributes([QgsField("Name", QVariant.String)])
-        target.updateFields()
-
-        source = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "source", "memory")
-        source.dataProvider().addAttributes([QgsField("NAME", QVariant.String)])
-        source.updateFields()
-        multi = QgsGeometry.collectGeometry([box(X0, Y0, X0 + 50, Y0 + 50), box(X0 + 100, Y0, X0 + 150, Y0 + 50)])
-        f = QgsFeature(source.fields())
-        f.setGeometry(multi)
-        f.setAttribute("NAME", "SPLIT OAKS")
-        source.dataProvider().addFeatures([f])
-
-        out = X._copy_outlines(target, source, lambda feat: {"Name": feat["NAME"]}, label="subdivisions")
-        self.assertEqual(out["copied"], 2)
-        self.assertEqual(out["skipped"]["multipart"], 0)
-        saved = list(target.getFeatures())
-        self.assertEqual([f["Name"] for f in saved], ["SPLIT OAKS", "SPLIT OAKS"])
-        self.assertAlmostEqual(sum(f.geometry().area() for f in saved), 50 * 50 * 2)
         self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures()), before)
         again = X.import_lots(self.fab, lots, "LOT", "SUBDIVISION", "BLOCK", "PARCELNO")
         self.assertEqual(again["copied"], 0)
@@ -681,6 +701,32 @@ class OfficeTests(_Base):
         self.assertEqual(again_blocks["skipped"]["same"], 1)
         self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures()), before)
         self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), lines_before)
+
+    def test_a_multipart_subdivision_splits_into_rows_on_a_single_polygon_table(self):
+        # Lots/Blocks/Subdivisions are always multi-polygon on a fabric created now (the fix for
+        # this), but an older SQL Server fabric's table may still be single-polygon-per-row -
+        # a multi-part subdivision must still import, as several same-named rows, not be skipped.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        target = QgsVectorLayer("CurvePolygon?crs=epsg:2238", "subdivisions", "memory")
+        target.dataProvider().addAttributes([QgsField("Name", QVariant.String)])
+        target.updateFields()
+
+        source = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "source", "memory")
+        source.dataProvider().addAttributes([QgsField("NAME", QVariant.String)])
+        source.updateFields()
+        multi = QgsGeometry.collectGeometry([box(X0, Y0, X0 + 50, Y0 + 50), box(X0 + 100, Y0, X0 + 150, Y0 + 50)])
+        f = QgsFeature(source.fields())
+        f.setGeometry(multi)
+        f.setAttribute("NAME", "SPLIT OAKS")
+        source.dataProvider().addFeatures([f])
+
+        out = X._copy_outlines(target, source, lambda feat: {"Name": feat["NAME"]}, label="subdivisions")
+        self.assertEqual(out["copied"], 2)
+        self.assertEqual(out["skipped"]["multipart"], 0)
+        saved = list(target.getFeatures())
+        self.assertEqual([f["Name"] for f in saved], ["SPLIT OAKS", "SPLIT OAKS"])
+        self.assertAlmostEqual(sum(f.geometry().area() for f in saved), 50 * 50 * 2)
 
     def test_curved_multipolygon_imports(self):
         import os

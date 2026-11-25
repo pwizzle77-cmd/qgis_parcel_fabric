@@ -22,6 +22,38 @@ CHECKS = [
 ]
 
 
+def geometry_fault(geom):
+    """'empty' or 'invalid' for a parcel polygon. A true curve skips the GEOS
+    test: an arc is not a GEOS polygon. None when the shape can be checked further."""
+    if geom is None or geom.isNull() or geom.isEmpty():
+        return "empty"
+    raw = geom.constGet()
+    if raw is not None and raw.hasCurvedSegments():
+        return None
+    if not geom.isGeosValid():
+        return "invalid"
+    return None
+
+
+def repeated_vertex(curve):
+    """A straight line that repeats a vertex inside one segment. A circular arc
+    is left alone (a full circle starts and ends on the same point). The shared
+    point where two segments of a compound curve meet is not a repeat."""
+    if curve is None or curve.hasCurvedSegments():
+        return False
+    parts = [curve.curveAt(i) for i in range(curve.nCurves())] if hasattr(curve, "nCurves") else [curve]
+    for part in parts:
+        if not hasattr(part, "pointN"):
+            continue
+        prev = None
+        for i in range(part.numPoints()):
+            p = part.pointN(i)
+            if prev is not None and abs(p.x() - prev[0]) <= 1e-9 and abs(p.y() - prev[1]) <= 1e-9:
+                return True
+            prev = (p.x(), p.y())
+    return False
+
+
 def tell(progress, pct, text=None):
     """Report a percent and the check that is running. A one-argument callback still works."""
     if progress is None:
@@ -102,6 +134,9 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
                 continue
             s, e = _ends(curve)
             ends += [(f.id(), s), (f.id(), e)]
+            if repeated_vertex(curve):
+                issues.append(Issue("error", "%s line repeats a vertex" % t,
+                                    s[0], s[1], lyr.id(), f.id()))
             if "no_cogo" in checks and Fabric.course_from_feature(f) is None:
                 issues.append(Issue("warning", "%s line has no COGO dimensions" % t,
                                     s[0], s[1], lyr.id(), f.id()))
@@ -135,10 +170,24 @@ def run_checks(fabric: Fabric, ptypes=None, extent=None, checks=None, feedback=N
             if total and total > 0 and n and n % 200 == 0:
                 sub("Checking %s parcels: %d of %d" % (t, n, total), min(0.99, n / float(total)))
             g = f.geometry()
-            if g.isNull():
+            name = f["ParcelNumber"] or f["Name"] or "#%d" % f.id()
+            fault = geometry_fault(g)
+            if fault:
+                p = None
+                if fault == "invalid":
+                    try:
+                        surface = g.pointOnSurface()
+                        if not surface.isEmpty():
+                            p = surface.asPoint()
+                    except Exception:
+                        p = None
+                issues.append(Issue(
+                    "error",
+                    "%s %s has no geometry" % (t, name) if fault == "empty"
+                    else "%s %s crosses itself" % (t, name),
+                    p.x() if p else None, p.y() if p else None, lyr.id(), f.id()))
                 continue
             p = g.pointOnSurface().asPoint()
-            name = f["ParcelNumber"] or f["Name"] or "#%d" % f.id()
             if f["IsSeed"] == 1:
                 if "unbuilt_seeds" in checks:
                     issues.append(Issue("info", "Seed %s has not been built" % name,

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """A list of problems (from Build or Check Fabric) you can click to zoom to."""
 
-from qgis.core import (QgsCoordinateTransform, QgsGeometry, QgsPointXY, QgsProject,
+from qgis.core import (Qgis, QgsCoordinateTransform, QgsGeometry, QgsPointXY, QgsProject,
                        QgsRectangle)
+from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
@@ -19,6 +20,7 @@ class IssuesDialog(QDialog):
         self.iface = iface
         self.crs = crs  # CRS of the issue coordinates (the fabric's)
         self.issues = []
+        self._band = None
         self.setWindowTitle(title)
         self.resize(620, 420)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -41,6 +43,8 @@ class IssuesDialog(QDialog):
         lay.addWidget(self.table)
         self.show_issues(issues, summary)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        zoom = bb.addButton("Zoom to Error", QDialogButtonBox.ButtonRole.ActionRole)
+        zoom.clicked.connect(self._zoom_selected)
         bb.rejected.connect(self.close)
         lay.addWidget(bb)
 
@@ -48,6 +52,7 @@ class IssuesDialog(QDialog):
         if getattr(self, "_running", False):
             event.ignore()
             return
+        self._clear_marks()
         super().closeEvent(event)
 
     def set_progress(self, pct, text=None):
@@ -60,7 +65,9 @@ class IssuesDialog(QDialog):
 
     def show_issues(self, issues, summary):
         self.bar.setVisible(False)
-        self.status.setText(summary + "   Double-click a row to zoom to it.")
+        self.status.setText(summary + "   Double-click a row, or Zoom to Error. "
+                            "Marks stay on the map until this window closes.")
+        self._mark()
         order = {"error": 0, "warning": 1, "info": 2}
         self.issues = sorted(issues or [], key=lambda i: order.get(i.severity, 3))
         t = self.table
@@ -71,6 +78,36 @@ class IssuesDialog(QDialog):
             a.setForeground(QColor(SEV_COLORS.get(i.severity, "#000")))
             t.setItem(r, 0, a)
             t.setItem(r, 1, QTableWidgetItem(i.message))
+
+    def _zoom_selected(self):
+        row = self.table.currentRow()
+        if row < 0 and self.issues:
+            row = 0
+        if row >= 0:
+            self._zoom(row, 0)
+
+    def _clear_marks(self):
+        if self._band is not None:
+            self._band.reset()
+            self._band = None
+
+    def _mark(self):
+        """Red marks for errors and warnings. Notes are left off the map."""
+        self._clear_marks()
+        pts = [i for i in self.issues if i.severity != "info" and i.x is not None]
+        if not pts:
+            return
+        canvas = self.iface.mapCanvas()
+        dest = canvas.mapSettings().destinationCrs()
+        xf = QgsCoordinateTransform(self.crs, dest, QgsProject.instance())
+        band = QgsRubberBand(canvas, Qgis.GeometryType.Point)
+        band.setColor(QColor("#b3261e"))
+        band.setIcon(QgsRubberBand.IconType.ICON_CIRCLE)
+        band.setWidth(3)
+        for i in pts:
+            band.addPoint(xf.transform(QgsPointXY(i.x, i.y)), False)
+        band.show()
+        self._band = band
 
     def _zoom(self, row, _col):
         i = self.issues[row]

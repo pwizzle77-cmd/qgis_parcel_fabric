@@ -62,6 +62,7 @@ _COMMON_TAIL = [
     ("RetiredByRecord", STR, GUID_LEN, "Retired by record"),
     ("CreatedByUser", STR, 100, "Created by user"),
     ("RetiredByUser", STR, 100, "Retired by user"),
+    ("EditUser", STR, 100, "Last edited by user"),
 ]
 
 RECORD_FIELDS = [
@@ -80,6 +81,7 @@ RECORD_FIELDS = [
     ("QPF_Rotation", DBL, 0, "Ground to grid rotation (deg)"),
     ("QPF_Notes", STR, 1024, "Notes"),
     ("CreatedByUser", STR, 100, "Created by user"),
+    ("EditUser", STR, 100, "Last edited by user"),
 ]
 
 POINT_FIELDS = [

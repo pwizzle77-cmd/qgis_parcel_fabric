@@ -5,12 +5,12 @@ Every line, point and parcel belongs to the legal record (plat, deed, survey) th
 created it. Field names match Pro's parcel fabric so data moves between the two.
 Independent of Esri. Pure Python: QGIS, its bundled Qt and the standard library only.
 
-**Status: 0.10.5, experimental.** Test it on a copy of real data before
+**Status: 0.10.12, experimental.** Test it on a copy of real data before
 using it for production work.
 
 ## Install
 
-1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.5.zip`.
+1. Run `python build_plugin.py` to make `dist/parcel_fabric-0.10.12.zip`.
 2. In QGIS: **Plugins → Manage and Install Plugins → Install from ZIP**, pick the zip.
 3. Enable **Parcel Fabric**. The toolbar shows Records, Traverse, Build, Assign Parcel
    Numbers and Check Fabric, plus the active record. **More** holds the rest. The same

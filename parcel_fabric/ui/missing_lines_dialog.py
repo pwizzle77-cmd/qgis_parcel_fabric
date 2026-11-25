@@ -91,8 +91,9 @@ class MissingLinesDialog(QDialog):
         lines_made = points_made = 0
         try:
             for ptype, gids in by_type.items():
-                def tell(frac, done=done, count=len(gids)):
-                    progress.setValue(int(100 * (done + frac * count) / total))
+                def tell(done_n, _count, base=done, overall=total):
+                    progress.setValue(int(100 * (base + done_n) / overall))
+                    progress.setLabelText("Creating lines: %d/%d" % (base + done_n, overall))
                 try:
                     lm, pm = derive_lines_and_points(fab, ptype, gids, progress=tell)
                 except Exception as e:

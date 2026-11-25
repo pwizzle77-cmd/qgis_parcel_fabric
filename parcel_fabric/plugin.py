@@ -4,7 +4,7 @@
 import os
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtGui import QIcon, QKeySequence
 from qgis.PyQt.QtWidgets import QApplication, QLabel, QMenu, QMessageBox, QToolButton
 
 try:
@@ -37,15 +37,20 @@ class ParcelFabricPlugin:
         self.toolbar = self.iface.addToolBar("Parcel Fabric")
         self.toolbar.setObjectName("ParcelFabricToolbar")
         self._add("records", "Records", self.show_records,
-                  "Records panel: create records, set the active record, build parcels")
+                  "Records panel: create records, set the active record, build parcels",
+                  "Alt+Shift+R")
         self._add("traverse", "Traverse", self.show_traverse,
-                  "Enter courses from a plat or deed and create fabric lines")
+                  "Enter courses from a plat or deed and create fabric lines",
+                  "Alt+Shift+T")
         self._add("build", "Build Active Record", self.build_active,
-                  "Build parcels from the active record's closed loops")
+                  "Build parcels from the active record's closed loops",
+                  "Alt+Shift+B")
         self._add("numbers", "Assign Parcel Numbers", self.assign_numbers,
-                  "Number the selected parcels, or type the roll's parcel ID")
+                  "Number the selected parcels, or type the roll's parcel ID",
+                  "Alt+Shift+N")
         self._add("check", "Check Fabric", self.check_fabric,
-                  "Find open loops, gaps, overlaps, missing COGO and other problems")
+                  "Find open loops, gaps, overlaps, missing COGO and other problems",
+                  "Alt+Shift+C")
         self._rec_lbl = QLabel("No active record")
         self._rec_lbl.setStyleSheet("font-weight: bold; padding: 0 8px;")
         self.toolbar.addWidget(self._rec_lbl)
@@ -112,8 +117,11 @@ class ParcelFabricPlugin:
         self.actions.append(a)
         return a
 
-    def _add(self, icon_name, text, slot, tip):
+    def _add(self, icon_name, text, slot, tip, shortcut=None):
         a = self._action(icon_name, text, slot, tip)
+        if shortcut:
+            a.setShortcut(QKeySequence(shortcut))
+            a.setToolTip("%s (%s)" % (tip, shortcut))
         self.toolbar.addAction(a)
         return a
 
@@ -223,23 +231,32 @@ class ParcelFabricPlugin:
         self.manager.set_active(fab.id)
         self.show_records()
 
+    def _show_dock(self, which):
+        """Records and Traverse share one tab on the right. A second dock must not split it."""
+        if which == "traverse" and self._need_fabric() is None:
+            return
+        slot = "records_dock" if which == "records" else "traverse_dock"
+        dock = getattr(self, slot)
+        if dock is None:
+            if which == "records":
+                from .ui.records_dock import RecordsDock
+                dock = RecordsDock(self.iface, self.manager)
+            else:
+                from .ui.traverse_dock import TraverseDock
+                dock = TraverseDock(self.iface, self.manager)
+            setattr(self, slot, dock)
+            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            other = self.traverse_dock if which == "records" else self.records_dock
+            if other is not None:
+                self.iface.tabifyDockWidget(other, dock)
+        dock.show()
+        dock.raise_()
+
     def show_records(self):
-        if self.records_dock is None:
-            from .ui.records_dock import RecordsDock
-            self.records_dock = RecordsDock(self.iface, self.manager)
-            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.records_dock)
-        self.records_dock.show()
-        self.records_dock.raise_()
+        self._show_dock("records")
 
     def show_traverse(self):
-        if self._need_fabric() is None:
-            return
-        if self.traverse_dock is None:
-            from .ui.traverse_dock import TraverseDock
-            self.traverse_dock = TraverseDock(self.iface, self.manager)
-            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.traverse_dock)
-        self.traverse_dock.show()
-        self.traverse_dock.raise_()
+        self._show_dock("traverse")
 
     def build_active(self):
         fab = self._need_fabric()

@@ -439,7 +439,7 @@ def _suffix_int(value):
     return number if 0 <= number <= 999 else 0
 
 
-def _record_feature(fabric, name, when, parcel_id, book="", page=""):
+def _record_feature(fabric, name, when, parcel_id, book="", page="", created_by="", edited_by=""):
     lyr = fabric.records
     feat = QgsFeature(lyr.fields())
     gid = S.new_guid()
@@ -453,6 +453,10 @@ def _record_feature(fabric, name, when, parcel_id, book="", page=""):
         vals["Book"] = str(book)[:20]
     if page and lyr.fields().indexOf("Page") >= 0:
         vals["Page"] = str(page)[:20]
+    if created_by and lyr.fields().indexOf("CreatedByUser") >= 0:
+        vals["CreatedByUser"] = str(created_by)[:100]
+    if edited_by and lyr.fields().indexOf("EditUser") >= 0:
+        vals["EditUser"] = str(edited_by)[:100]
     for key, value in vals.items():
         i = lyr.fields().indexOf(key)
         if i >= 0:
@@ -593,7 +597,8 @@ def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
                     "ChildID": child["GlobalID"],
                     "ParentNumber": parent["ParcelNumber"] or None,
                     "ChildNumber": child["ParcelNumber"] or None,
-                    "ParcelType": child["ParcelType"], "EditDate": now}
+                    "ParcelType": child["ParcelType"], "EditDate": now,
+                    "EditUser": (_stored_user(child, "EditUser") or _stored_user(child, "CreatedByUser"))[:100] or None}
             for key, value in vals.items():
                 i = lin.fields().indexOf(key)
                 if i >= 0:
@@ -604,14 +609,20 @@ def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
     return len(pairs)
 
 
-def _resolve_point(fabric, xy, record_gid):
+def _stored_user(feat, name):
+    if feat.fields().indexOf(name) < 0:
+        return ""
+    return _attr_text(feat, name)
+
+
+def _resolve_point(fabric, xy, record_gid, created_by="", edited_by=""):
     """An existing or new fabric point at ``xy``, written at once so the
     next lookup (an adjoining parcel's own corner) sees it. Returns
     (GlobalID, already existed)."""
     hit = fabric.find_point(xy[0], xy[1])
     if hit is not None:
         return hit["GlobalID"], True
-    pf = fabric.new_point_feature(xy[0], xy[1], record_gid)
+    pf = fabric.new_point_feature(xy[0], xy[1], record_gid, created_by, edited_by)
     if not fabric.points.dataProvider().addFeatures([pf])[0]:
         raise RuntimeError("Could not write a fabric point while deriving lines.")
     return pf["GlobalID"], False
@@ -660,23 +671,25 @@ def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
     expr = '"GlobalID" IN (%s)' % ", ".join(quote(g) for g in gids)
     parcels = list(fabric.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(expr)))
     lines_made = points_made = 0
-    total = max(len(parcels), 1)
+    n = len(parcels)
     for i, p in enumerate(parcels):
-        if progress is not None and i % 25 == 0:
-            progress(i / total)
+        if progress is not None and (i % 25 == 0 or i + 1 == n):
+            progress(i + 1, n)
         record_gid = p["CreatedByRecord"]
+        created_by, edited_by = _stored_user(p, "CreatedByUser"), _stored_user(p, "EditUser")
         for ext, holes in polygon_rings(p.geometry()):
             for ring in [ext] + list(holes):
                 for seg in ring:
                     a, b = seg[1], seg[-1]
                     if math.hypot(a[0] - b[0], a[1] - b[1]) <= tol:
                         continue
-                    pa, had_a = _resolve_point(fabric, a, record_gid)
-                    pb, had_b = _resolve_point(fabric, b, record_gid)
+                    pa, had_a = _resolve_point(fabric, a, record_gid, created_by, edited_by)
+                    pb, had_b = _resolve_point(fabric, b, record_gid, created_by, edited_by)
                     points_made += (0 if had_a else 1) + (0 if had_b else 1)
                     if pa == pb or _existing_line(fabric, ptype, a, b, tol) is not None:
                         continue
-                    nf = _new_line(fabric, fabric.lines, [a, b], ptype, record_gid)
+                    nf = _new_line(fabric, fabric.lines, [a, b], ptype, record_gid,
+                                   created_by=created_by, edited_by=edited_by)
                     if not fabric.lines.dataProvider().addFeatures([nf])[0]:
                         raise RuntimeError("Could not write a fabric line while deriving lines.")
                     lines_made += 1
@@ -687,15 +700,19 @@ def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
 
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
                         split_history=True, parent_suffix=0, separator=None, digits=None,
-                        book="", page="", progress=None):
+                        book="", page="", progress=None, book_field=None, page_field=None,
+                        created_field=None, edited_field=None):
     """Copy polygons from ``source`` in as current parcels.
 
     With no ``record``, each parcel id is filed as its own record (name and
-    parcel id are that number, book and page blank). ``date_field`` is that
-    record's recorded date. A blank number shares one "Existing parcels" record.
-    ``book`` and ``page`` are optional and, when set, are written on each new record.
-    Pass ``record`` to file everything under a record that already exists. That path
-    leaves the record's book and page alone.
+    parcel id are that number). ``date_field`` is that record's recorded date.
+    A blank number shares one "Existing parcels" record. ``book`` and ``page``
+    are written on each new record. ``book_field`` and ``page_field`` read them
+    from the source feature instead, and a blank value there falls back to the
+    typed book or page. ``created_field`` and ``edited_field`` are the source
+    user who created the parcel and the user who last edited it. Pass ``record``
+    to file everything under a record that already exists. That path leaves the
+    record's book, page, and users alone. The parcel still keeps its own users.
 
     ``split_history`` adds inferred links from suffixes to the parent (000 unless
     ``parent_suffix`` says otherwise); see _link_splits. ``separator`` and ``digits``
@@ -718,8 +735,8 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
 
     if record is not None and fabric.record_by_id(record) is None:
         raise RuntimeError("That record is not in this fabric.")
-    if record is None:
-        S.add_missing_fields(fabric.records, S.ROLE_RECORDS)
+    for role in (S.ROLE_PARCELS, S.ROLE_RECORDS, S.ROLE_LINES, S.ROLE_POINTS):
+        S.add_missing_fields(fabric.layers[role], role)
     if not ptype:
         raise RuntimeError("Choose a parcel type.")
     rule_sep, rule_digits, _parent = number_pattern(fabric.settings)
@@ -806,21 +823,25 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             copied += _write_features(target, batch)
             batch = []
 
-    def take_record(number, when):
+    def take_record(number, when, feat, created_by="", edited_by=""):
         nonlocal blank_gid
         if record:
             return record
+        this_book = _attr_text(feat, book_field) or book
+        this_page = _attr_text(feat, page_field) or page
         if number:
             gid = by_number.get(number)
             if gid:
                 return gid
-            gid, recfeat = _record_feature(fabric, number, when, number, book, page)
+            gid, recfeat = _record_feature(
+                fabric, number, when, number, this_book, this_page, created_by, edited_by)
             pending.append(recfeat)
             by_number[number] = gid
             made.append(gid)
             return gid
         if blank_gid is None:
-            gid, recfeat = _record_feature(fabric, "Existing parcels", when, "", book, page)
+            gid, recfeat = _record_feature(
+                fabric, "Existing parcels", when, "", this_book, this_page, created_by, edited_by)
             pending.append(recfeat)
             blank_gid = gid
             made.append(gid)
@@ -884,11 +905,18 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
                 skipped["multipart"] += 1
                 continue
         when = _as_qdate(feat[date_field]) if date_field and feat.fields().indexOf(date_field) >= 0 else None
+        created_by = _attr_text(feat, created_field)[:100]
+        edited_by = _attr_text(feat, edited_field)[:100]
         nf = QgsFeature(fields)
         nf.setGeometry(geom)
         base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0,
-                "StatedAreaUnit": 1, "CreatedByRecord": take_record(number, when), "Name": text or None,
-                "CalculatedArea": area(geom)}
+                "StatedAreaUnit": 1,
+                "CreatedByRecord": take_record(number, when, feat, created_by, edited_by),
+                "Name": text or None, "CalculatedArea": area(geom)}
+        if created_by:
+            base["CreatedByUser"] = created_by
+        if edited_by:
+            base["EditUser"] = edited_by
         base.update(vals)
         for key, value in base.items():
             i = fields.indexOf(key)
@@ -923,8 +951,10 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         _tell(progress, 92, "Linking split history")
         linked = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems, separator, digits)
         target.reload()
-    _tell(progress, 93, "Tracing parcel boundaries")
-    lines_made, points_made = derive_lines_and_points(fabric, ptype, all_gids)
+    def on_lines(done, count):
+        _tell(progress, 93 + 3.0 * done / max(count, 1), "Creating lines: %d/%d" % (done, count))
+
+    lines_made, points_made = derive_lines_and_points(fabric, ptype, all_gids, on_lines)
     record_ids = [] if record else list(made)
     date_ids = []
     if copied and record:

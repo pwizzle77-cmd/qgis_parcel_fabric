@@ -237,13 +237,18 @@ def node_lines(fabric, ptype, xy, record, ed, res):
         res.lines_split += 1
 
 
-def _new_line(fabric, lyr, pts, ptype, record, dim_source="Computed"):
+def _new_line(fabric, lyr, pts, ptype, record, dim_source="Computed", created_by="", edited_by=""):
     f = QgsFeature(lyr.fields())
     f.setGeometry(_line_geom(pts))
     az, dist = U.inverse(pts[0][0], pts[0][1], pts[-1][0], pts[-1][1])
-    _set(f, {"GlobalID": S.new_guid(), "ParcelType": ptype, "Direction": U.azimuth_to_esri(az),
-             "Distance": dist, "COGOType": 2, "IsCOGOGround": 0, "CreatedByRecord": record,
-             "QPF_DimSource": dim_source})
+    vals = {"GlobalID": S.new_guid(), "ParcelType": ptype, "Direction": U.azimuth_to_esri(az),
+            "Distance": dist, "COGOType": 2, "IsCOGOGround": 0, "CreatedByRecord": record,
+            "QPF_DimSource": dim_source}
+    if created_by:
+        vals["CreatedByUser"] = str(created_by)[:100]
+    if edited_by:
+        vals["EditUser"] = str(edited_by)[:100]
+    _set(f, vals)
     return f
 
 

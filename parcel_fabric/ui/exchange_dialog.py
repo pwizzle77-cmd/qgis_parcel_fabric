@@ -26,15 +26,21 @@ _LOT_FIELDS = ("LOT", "LOT_NO", "LOTNO", "LOT_NUM", "LOTNUM")
 _BLOCK_FIELDS = ("BLOCK", "BLK", "BLOCK_NO", "BLOCKNO")
 _SUB_FIELDS = ("SUBDIVISION", "SUBDIVISIO", "SUBDIV", "SUB_NAME", "SUBNAME", "SUB")
 _NAME_FIELDS = ("NAME", "SUBDIVISION", "SUBDIVISIO", "SUB_NAME", "SUBNAME", "SUBDIV")
+_BOOK_FIELDS = ("BOOK", "DEEDBOOK", "DEED_BOOK", "ORBOOK", "OR_BOOK", "PLATBOOK", "PLAT_BOOK", "BK")
+_PAGE_FIELDS = ("PAGE", "DEEDPAGE", "DEED_PAGE", "ORPAGE", "OR_PAGE", "PLATPAGE", "PLAT_PAGE", "PG")
+_CREATED_FIELDS = ("CREATED_USER", "CREATEDBY", "CREATED_BY", "CREATEUSER", "CREATE_USER",
+                   "CREATOR", "ADDED_BY", "ADDUSER", "created_user", "CreatedByUser")
+_EDITED_FIELDS = ("LAST_EDITED_USER", "LASTEDITOR", "EDITED_BY", "EDITUSER", "EDIT_USER",
+                  "UPDATED_BY", "UPDATE_USER", "MODIFIED_BY", "last_edited_user", "EditUser")
 
 _LAYER_INFO = {
     "Parcels": "Each parcel id becomes its own record. The record name and parcel id are that "
-               "number. Book and page are optional; leave them blank when you don't have them. "
+               "number. Book, page, created-by, and last-edited-by can come from fields on the layer. "
                "Map a date field onto the recorded date. "
                "Split history uses the parcel number below: separator, how many trailing digits "
                "count as the split, and the parent suffix. Every parcel comes in current; nothing is "
-               "retired. Leave it off when the suffix is not a split. No boundary "
-               "lines are created. The same outline is imported once. A text "
+               "retired. Leave it off when the suffix is not a split. Boundary lines and corner "
+               "points are traced after the parcels are written. The same outline is imported once. A text "
                "field keeps leading zeros. Polygons with the same number become one parcel, all-zero "
                "numbers come in without a number, and true curves stay curves.",
     "Lots": "Copies lot polygons into the Lots table. Tax parcels stay in Parcels. A lot drawn "
@@ -161,6 +167,10 @@ class ExchangeDialog(QDialog):
         lay.addLayout(form)
         self.num_field = _field_box()
         self.date_field = _field_box()
+        self.book_field = _field_box()
+        self.page_field = _field_box()
+        self.created_field = _field_box()
+        self.edited_field = _field_box()
         self.lot_field = _field_box()
         self.lot_sub_field = _field_box()
         self.lot_block_field = _field_box()
@@ -170,6 +180,8 @@ class ExchangeDialog(QDialog):
         self.block_sub_field = _field_box()
         self._field_boxes = (
             (self.num_field, _NUMBER_FIELDS), (self.date_field, _DATE_FIELDS),
+            (self.book_field, _BOOK_FIELDS), (self.page_field, _PAGE_FIELDS),
+            (self.created_field, _CREATED_FIELDS), (self.edited_field, _EDITED_FIELDS),
             (self.lot_field, _LOT_FIELDS), (self.lot_sub_field, _SUB_FIELDS),
             (self.lot_block_field, _BLOCK_FIELDS), (self.lot_parcel_field, _NUMBER_FIELDS),
             (self.sub_name_field, _NAME_FIELDS),
@@ -200,20 +212,25 @@ class ExchangeDialog(QDialog):
         self.use_active.setToolTip("File every polygon under the active record. The date, book, and page "
                                    "boxes are not used.")
         self.book = QLineEdit()
-        self.book.setPlaceholderText("optional")
-        self.book.setMaximumWidth(120)
-        self.book.setToolTip("Written on each new record. Leave blank when you don't have a book.")
+        self.book.setPlaceholderText("if the field is blank")
+        self.book.setMaximumWidth(140)
+        self.book.setToolTip("Used when the book field is empty, or when no book field is chosen.")
         self.page = QLineEdit()
-        self.page.setPlaceholderText("optional")
-        self.page.setMaximumWidth(120)
-        self.page.setToolTip("Written on each new record. Leave blank when you don't have a page.")
+        self.page.setPlaceholderText("if the field is blank")
+        self.page.setMaximumWidth(140)
+        self.page.setToolTip("Used when the page field is empty, or when no page field is chosen.")
+        self.book_field.setToolTip("Each new record takes its book from this field.")
+        self.page_field.setToolTip("Each new record takes its page from this field.")
+        self.created_field.setToolTip("Who created this parcel in the source. Written on the parcel, "
+                                      "its new record, and the lines and points traced from it.")
+        self.edited_field.setToolTip("Who last edited this parcel in the source. Written the same way.")
         self.use_active.toggled.connect(self._sync_book_page)
         book_row = QHBoxLayout()
-        book_row.addWidget(QLabel("Book"))
+        book_row.addWidget(self.book_field, 1)
         book_row.addWidget(self.book)
-        book_row.addWidget(QLabel("Page"))
-        book_row.addWidget(self.page)
-        book_row.addStretch(1)
+        page_row = QHBoxLayout()
+        page_row.addWidget(self.page_field, 1)
+        page_row.addWidget(self.page)
         self.history = QCheckBox("Build split history")
         self.history.setChecked(True)
         self.history.setToolTip("Link each split, as an inferred split, to the lower number it was cut out of "
@@ -245,7 +262,10 @@ class ExchangeDialog(QDialog):
         f.addRow("Parcel number field", self.num_field)
         f.addRow("Date field", self.date_field)
         f.addRow("Parcel type", self.layer_type)
-        f.addRow("Book and page", book_row)
+        f.addRow("Book", book_row)
+        f.addRow("Page", page_row)
+        f.addRow("Created by", self.created_field)
+        f.addRow("Last edited by", self.edited_field)
         f.addRow("Parcel number", pattern)
         f.addRow("", self.use_active)
         f.addRow("", self.history)
@@ -274,8 +294,8 @@ class ExchangeDialog(QDialog):
         return w
 
     def _sync_book_page(self, use_active):
-        self.book.setEnabled(not use_active)
-        self.page.setEnabled(not use_active)
+        for w in (self.book, self.page, self.book_field, self.page_field):
+            w.setEnabled(not use_active)
 
     def _target_changed(self, name):
         names = ["Parcels", "Lots", "Blocks", "Subdivisions"]
@@ -356,14 +376,19 @@ class ExchangeDialog(QDialog):
                 self.fab.settings.update({
                     "number_separator": sep, "number_split_digits": str(digits),
                     "number_parent_suffix": parent})
-                book = "" if self.use_active.isChecked() else self.book.text().strip()
-                page = "" if self.use_active.isChecked() else self.page.text().strip()
+                use_active = self.use_active.isChecked()
+                book = "" if use_active else self.book.text().strip()
+                page = "" if use_active else self.page.text().strip()
                 result = X.import_parcel_layer(
                     self.fab, src, self.layer_type.currentText(), rid,
                     self.num_field.currentField() or None,
                     self.date_field.currentField() or None,
                     self.history.isChecked(), parent, sep, digits, book, page,
-                    progress=self._progress)
+                    progress=self._progress,
+                    book_field=None if use_active else (self.book_field.currentField() or None),
+                    page_field=None if use_active else (self.page_field.currentField() or None),
+                    created_field=self.created_field.currentField() or None,
+                    edited_field=self.edited_field.currentField() or None)
                 label = "parcels"
         except Exception as e:
             self._end_progress()

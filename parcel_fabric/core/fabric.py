@@ -555,13 +555,18 @@ class Fabric:
                 best, bd = f, d
         return best
 
-    def new_point_feature(self, x, y, record_gid):
+    def new_point_feature(self, x, y, record_gid, created_by="", edited_by=""):
         lyr = self.points
         f = QgsFeature(lyr.fields())
         f.setGeometry(QgsGeometry(QgsPoint(x, y)))
-        for k, v in {"GlobalID": S.new_guid(), "X": x, "Y": y, "IsFixed": 0,
-                     "AdjustmentConstraint": 0, "CreatedByRecord": record_gid,
-                     "QPF_IsControl": 0}.items():
+        vals = {"GlobalID": S.new_guid(), "X": x, "Y": y, "IsFixed": 0,
+                "AdjustmentConstraint": 0, "CreatedByRecord": record_gid,
+                "QPF_IsControl": 0}
+        if created_by:
+            vals["CreatedByUser"] = str(created_by)[:100]
+        if edited_by:
+            vals["EditUser"] = str(edited_by)[:100]
+        for k, v in vals.items():
             i = lyr.fields().indexOf(k)
             if i >= 0:
                 f.setAttribute(i, v)

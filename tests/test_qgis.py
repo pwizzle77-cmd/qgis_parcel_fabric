@@ -266,6 +266,36 @@ class FabricTests(_Base):
         issues = run_checks(self.fab, ["Tax"])
         self.assertTrue(any("Dangling" in i.message for i in issues))
 
+    def test_check_finds_empty_crossed_and_repeated(self):
+        from parcel_fabric.core.edits import _line_geom
+        from parcel_fabric.core.fabric import EditSession
+        parcels, lines = self.fab.parcels, self.fab.lines
+
+        def feat(lyr, name, geom):
+            f = QgsFeature(lyr.fields())
+            f.setAttribute(lyr.fields().indexOf("GlobalID"), S.new_guid())
+            f.setAttribute(lyr.fields().indexOf("ParcelType"), "Tax")
+            f.setAttribute(lyr.fields().indexOf("CreatedByRecord"), self.rec)
+            if lyr.fields().indexOf("Name") >= 0:
+                f.setAttribute(lyr.fields().indexOf("Name"), name)
+            if geom is not None:
+                f.setGeometry(geom)
+            return f
+
+        bow = QgsGeometry.fromWkt(
+            "Polygon ((%g %g, %g %g, %g %g, %g %g, %g %g))" % (
+                X0, Y0, X0 + 10, Y0 + 10, X0 + 10, Y0, X0, Y0 + 10, X0, Y0))
+        self.assertFalse(bow.isGeosValid())
+        dup = _line_geom([(X0 + 500, Y0), (X0 + 500, Y0), (X0 + 510, Y0)])
+        with EditSession([parcels, lines], "Bad shapes") as ed:
+            ed.add(parcels, feat(parcels, "blank", None))
+            ed.add(parcels, feat(parcels, "bowtie", bow))
+            ed.add(lines, feat(lines, "dup", dup))
+        msgs = [i.message for i in run_checks(self.fab, ["Tax"])]
+        self.assertTrue(any("no geometry" in m for m in msgs), msgs)
+        self.assertTrue(any("crosses itself" in m for m in msgs), msgs)
+        self.assertTrue(any("repeats a vertex" in m for m in msgs), msgs)
+
     def test_build_in_view(self):
         self.traverse("Tax", courses(("N 0 E", 50), ("N 90 E", 50), ("S 0 E", 50), ("S 90 W", 50)))
         ext = QgsRectangle(X0 - 10, Y0 - 10, X0 + 60, Y0 + 60)
@@ -375,10 +405,10 @@ class Phase2Tests(_Base):
         kids = [f for g, f in allp.items() if g != self.parent["GlobalID"]]
         self.assertTrue(all(k["QPF_StartDate"] == QDate(2010, 7, 15) and not k["QPF_EndDate"] for k in kids))
         # family from one child goes back to the parent and over to its sibling
-        up = L.walk(self.fab, kids[0]["GlobalID"], up=True)
+        up, _cut = L.walk(self.fab, kids[0]["GlobalID"], up=True)
         roots = F.roots(up, kids[0]["GlobalID"])
         self.assertEqual(roots, {self.parent["GlobalID"]})
-        down = L.walk(self.fab, self.parent["GlobalID"], up=False)
+        down, _cut = L.walk(self.fab, self.parent["GlobalID"], up=False)
         self.assertEqual(F.descendants(down, roots), set(allp))
         self.assertEqual(H.undated_records(self.fab), [])
 

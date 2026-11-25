@@ -11,16 +11,55 @@ import math
 from qgis.core import Qgis, QgsGeometry, QgsPointXY
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QCursor
 from qgis.PyQt.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout,
+    QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout,
 )
 
 from ..core import edits as E
 from ..core import units as U
 from .issues_dialog import IssuesDialog
 from .map_tools import DrawLineTool, PickLineTool
+
+
+def records_of(fabric, features):
+    """GlobalID -> a feature that was created by it, for every distinct
+    CreatedByRecord among ``features`` (in the order first seen)."""
+    out = {}
+    for f in features:
+        gid = f["CreatedByRecord"]
+        if gid and gid not in out:
+            out[gid] = f
+    return out
+
+
+def pick_record_from_selection(widget, manager, features):
+    """Set the active record to the record that created one of ``features``.
+
+    With one distinct record among them it is used directly; with more than
+    one, a menu at the cursor offers each by name. Does nothing (after a
+    message) if none of them have a record."""
+    fab = manager.active
+    if fab is None:
+        return
+    found = records_of(fab, features)
+    if not found:
+        QMessageBox.information(widget, widget.windowTitle(),
+                                "The selected feature(s) have no record to use.")
+        return
+    if len(found) == 1:
+        manager.set_active_record(next(iter(found)))
+        return
+    menu = QMenu(widget)
+    for gid, f in found.items():
+        rec = fab.record_by_id(gid)
+        name = ((rec["Name"] if rec is not None else None) or f["ParcelNumber"] or f["Name"] or gid)
+        action = menu.addAction(str(name))
+        action.setData(gid)
+    chosen = menu.exec(QCursor.pos())
+    if chosen is not None:
+        manager.set_active_record(chosen.data())
 
 
 class _EditWindow(QDialog):
@@ -42,10 +81,18 @@ class _EditWindow(QDialog):
         self.lay = QVBoxLayout(self)
         self.sel_lbl = QLabel()
         self.sel_lbl.setWordWrap(True)
+        self.lay.addWidget(self.sel_lbl)
+        rec_row = QHBoxLayout()
         self.rec_lbl = QLabel()
         self.rec_lbl.setWordWrap(True)
-        self.lay.addWidget(self.sel_lbl)
-        self.lay.addWidget(self.rec_lbl)
+        rec_row.addWidget(self.rec_lbl, 1)
+        self.use_rec_btn = QPushButton("Use selected parcel's record")
+        self.use_rec_btn.setToolTip("Set the active record to the one that created the "
+                                    "selected parcel (or pick from theirs, if they differ).")
+        self.use_rec_btn.clicked.connect(
+            lambda: pick_record_from_selection(self, self.manager, self.selected()))
+        rec_row.addWidget(self.use_rec_btn)
+        self.lay.addLayout(rec_row)
         self._watched = []
         fab = manager.active
         if fab is not None:
@@ -77,9 +124,11 @@ class _EditWindow(QDialog):
         return out
 
     def _sel_changed(self, *_):
-        n = len(self.selected())
+        sel = self.selected()
         what = "parcel" if self.LAYER == "parcels" else "line"
-        self.sel_lbl.setText("<b>%d %s(s) selected.</b> %s" % (n, what, self.HELP))
+        self.sel_lbl.setText("<b>%d %s(s) selected.</b> %s" % (len(sel), what, self.HELP))
+        fab = self.manager.active
+        self.use_rec_btn.setEnabled(bool(fab is not None and records_of(fab, sel)))
         self.on_selection()
 
     def on_selection(self):

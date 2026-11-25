@@ -3,11 +3,13 @@
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QMessageBox, QVBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QVBoxLayout,
 )
 
 from ..core import edits as E
 from ..core import numbering as N
+from .edit_dialogs import pick_record_from_selection, records_of
 
 
 class StackDialog(QDialog):
@@ -24,6 +26,24 @@ class StackDialog(QDialog):
                       "into the land parcel. Building the same area again does not create another loop.")
         note.setWordWrap(True)
         lay.addWidget(note)
+        rec_row = QHBoxLayout()
+        self.rec_lbl = QLabel()
+        self.rec_lbl.setWordWrap(True)
+        rec_row.addWidget(self.rec_lbl, 1)
+        self.use_rec_btn = QPushButton("Use selected parcel's record")
+        self.use_rec_btn.setToolTip("Set the active record to the one that created the "
+                                    "selected parcel.")
+        self.use_rec_btn.clicked.connect(
+            lambda: pick_record_from_selection(self, self.manager,
+                                               list(self.manager.active.parcels.getSelectedFeatures())
+                                               if self.manager.active else []))
+        rec_row.addWidget(self.use_rec_btn)
+        lay.addLayout(rec_row)
+        fab = manager.active
+        if fab is not None:
+            fab.parcels.selectionChanged.connect(self._refresh_record_ui)
+        manager.activeRecordChanged.connect(self._refresh_record_ui)
+        self._refresh_record_ui()
         form = QFormLayout()
         self.number = QLineEdit()
         self.number.setPlaceholderText("Roll parcel ID")
@@ -37,6 +57,17 @@ class StackDialog(QDialog):
         bb.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._apply)
         bb.rejected.connect(self.close)
         lay.addWidget(bb)
+
+    def _refresh_record_ui(self, *_):
+        fab = self.manager.active
+        rec = self.manager.active_record() if fab is not None else None
+        if rec is None:
+            self.rec_lbl.setText("<span style='color:#b3261e'>No active record - set one in the "
+                                 "Records panel first.</span>")
+        else:
+            self.rec_lbl.setText("Edits will belong to record <b>%s</b>." % (rec["Name"] or rec["GlobalID"]))
+        sel = list(fab.parcels.getSelectedFeatures()) if fab is not None else []
+        self.use_rec_btn.setEnabled(bool(fab is not None and records_of(fab, sel)))
 
     def _apply(self):
         fab = self.manager.active

@@ -218,6 +218,34 @@ class SettingsDialog(QDialog):
         ml.addStretch(1)
         tabs.addTab(mu, "Multi-user")
 
+        maint = QWidget()
+        mnl = QVBoxLayout(maint)
+        mtxt = QLabel(
+            "<b>Database maintenance</b><br>A fabric only grows: a split, merge or import never "
+            "deletes anything, only retires it. These keep that healthy as a fabric ages.<br><br>"
+            "<b>Create Indexes</b> adds indexes on the fields every current-parcel query filters or "
+            "joins by (GlobalID, RetiredByRecord, CreatedByRecord...) - safe to run again later, an "
+            "index that already exists is left alone.<br><b>Update Statistics</b> refreshes the "
+            "database's query planner so it knows how the fabric has grown.<br><b>Reclaim Space</b> "
+            "compacts the database, recovering space years of retired rows leave behind (SQL Server "
+            "rebuilds indexes instead, which has the same effect there).")
+        mtxt.setWordWrap(True)
+        mnl.addWidget(mtxt)
+        mrow2 = QHBoxLayout()
+        idx_btn = QPushButton("Create Indexes")
+        an_btn = QPushButton("Update Statistics")
+        vac_btn = QPushButton("Reclaim Space")
+        idx_btn.clicked.connect(self._create_indexes)
+        an_btn.clicked.connect(self._update_statistics)
+        vac_btn.clicked.connect(self._reclaim_space)
+        mrow2.addWidget(idx_btn)
+        mrow2.addWidget(an_btn)
+        mrow2.addWidget(vac_btn)
+        mrow2.addStretch(1)
+        mnl.addLayout(mrow2)
+        mnl.addStretch(1)
+        tabs.addTab(maint, "Maintenance")
+
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._ok)
         bb.rejected.connect(self.reject)
@@ -235,6 +263,38 @@ class SettingsDialog(QDialog):
             return
         QMessageBox.information(self, "Multi-user rules", "Rules %s (%d statements)." %
                                 ("installed" if install else "removed", n))
+
+    def _create_indexes(self):
+        from ..core import maintenance as M
+        try:
+            n = M.create_indexes(self.fabric)
+        except Exception as e:
+            QMessageBox.critical(self, "Create Indexes", "Couldn't create indexes: %s\n\n"
+                                 "Your database login needs permission to create indexes." % e)
+            return
+        QMessageBox.information(self, "Create Indexes", "Done (%d statements)." % n)
+
+    def _update_statistics(self):
+        from ..core import maintenance as M
+        try:
+            n = M.update_statistics(self.fabric)
+        except Exception as e:
+            QMessageBox.critical(self, "Update Statistics", "Couldn't update statistics: %s" % e)
+            return
+        QMessageBox.information(self, "Update Statistics", "Done (%d statements)." % n)
+
+    def _reclaim_space(self):
+        from ..core import maintenance as M
+        if QMessageBox.question(self, "Reclaim Space",
+                "This compacts the whole database and can take a while on a large fabric. "
+                "Make sure nobody else has it open for editing. Continue?") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            n = M.reclaim_space(self.fabric)
+        except Exception as e:
+            QMessageBox.critical(self, "Reclaim Space", "Couldn't reclaim space: %s" % e)
+            return
+        QMessageBox.information(self, "Reclaim Space", "Done (%d statements)." % n)
 
     # ------------------------------------------------------------------
     def _browse_root(self):

@@ -98,6 +98,8 @@ class ParcelFabricPlugin:
         self._more_menu.addSeparator()
         self._more("exchange", "Import / Export...", lambda: self._window("exchange"),
                    "Import a parcel layer, an ArcGIS Pro fabric, or LandXML; export a tax-roll shapefile or DXF")
+        self._more("fabric", "Create Missing Lines and Points...", lambda: self._window("missing_lines"),
+                   "Trace boundary lines and corner points for parcels that don't have them yet")
         self._more("settings", "Fabric Settings...", self.fabric_settings,
                    "Parcel types, document folder and naming, parcel numbering, tolerances")
 
@@ -286,6 +288,7 @@ class ParcelFabricPlugin:
         from .ui.address_lots_dialog import AddressLotsDialog
         from .ui.exchange_dialog import ExchangeDialog
         from .ui.lineage_dialog import LineageDialog
+        from .ui.missing_lines_dialog import MissingLinesDialog
         from .ui.parcel_report_dialog import ParcelReportDialog
         from .ui.stack_dialog import StackDialog
         cls = {"subdivide": ED.SubdivideWindow, "address": AddressLotsDialog, "exchange": ExchangeDialog,
@@ -294,7 +297,7 @@ class ParcelFabricPlugin:
                "copy_parallel": ED.CopyParallelWindow, "lineage": LineageDialog,
                "history": HistoryDialog, "legal_writer": LegalWriterDialog,
                "compare": CompareDialog, "adjust": AdjustDialog,
-               "parcel_report": ParcelReportDialog}[kind]
+               "parcel_report": ParcelReportDialog, "missing_lines": MissingLinesDialog}[kind]
         w = cls(self.iface, self.manager)
         w.show()
         self._windows[kind] = w

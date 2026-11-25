@@ -306,7 +306,9 @@ The window stays open. A progress bar names the layer and how many features have
     record** to file the whole layer under one record. A text field keeps leading zeros.
     A strap still fills section, township and range. Any other id is stored as typed.
     `CalculatedArea` is the area of the polygon in square feet (Build replaces it with the area
-    by COGO). No boundary lines or points are created. A parcel that is several polygons keeps
+    by COGO). Boundary lines and corner points are traced from each parcel afterwards, shared
+    between adjoining parcels instead of duplicated, so Build, Merge and Split have something
+    to work with (a shared side already has a line, so only new sides get one). A parcel that is several polygons keeps
     those polygons, also when the layer has one feature per polygon with the same number,
     and true curves stay curves. A GeoPackage that still stores one
     polygon per parcel is switched so they fit, and a backup of the file is saved first.

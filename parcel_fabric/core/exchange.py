@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Import an ArcGIS Pro parcel fabric, a parcel layer, or LandXML; export DXF and the tax roll."""
 
+import math
 import os
 import re
 
@@ -14,6 +15,7 @@ from qgis.core import (
     QgsLineString,
     QgsPoint,
     QgsProject,
+    QgsRectangle,
     QgsVectorLayer,
 )
 
@@ -22,8 +24,9 @@ from . import landxml
 from . import schema as S
 from . import units as U
 from .build import build_parcels, update_record_footprint
+from .edits import _new_line
 from .fabric import CURRENT, EditSession, quote, type_expr
-from .geomio import parts_of
+from .geomio import parts_of, polygon_rings
 
 # a few field names that differ between Pro versions / exports
 ALIASES = {"RecordedDate": ["RecordedDate", "RecordDate", "Recorded_Date", "DateRecorded"],
@@ -601,6 +604,87 @@ def _link_splits(fabric, ptype, parent_suffix, stems, separator="-", digits=3):
     return len(pairs)
 
 
+def _resolve_point(fabric, xy, record_gid):
+    """An existing or new fabric point at ``xy``, written at once so the
+    next lookup (an adjoining parcel's own corner) sees it. Returns
+    (GlobalID, already existed)."""
+    hit = fabric.find_point(xy[0], xy[1])
+    if hit is not None:
+        return hit["GlobalID"], True
+    pf = fabric.new_point_feature(xy[0], xy[1], record_gid)
+    if not fabric.points.dataProvider().addFeatures([pf])[0]:
+        raise RuntimeError("Could not write a fabric point while deriving lines.")
+    return pf["GlobalID"], False
+
+
+def _existing_line(fabric, ptype, a, b, tol):
+    """A current ``ptype`` line already running between a and b (either
+    direction), within tol - so a shared boundary is never duplicated."""
+    rect = QgsRectangle(min(a[0], b[0]) - tol, min(a[1], b[1]) - tol,
+                        max(a[0], b[0]) + tol, max(a[1], b[1]) + tol)
+    req = QgsFeatureRequest().setFilterRect(rect).setFilterExpression(
+        "%s AND %s" % (CURRENT, type_expr(ptype)))
+
+    def close(p, q):
+        return math.hypot(p[0] - q[0], p[1] - q[1]) <= tol
+
+    for f in fabric.lines.getFeatures(req):
+        verts = list(QgsGeometry(f.geometry().constGet().segmentize()).vertices())
+        if len(verts) < 2:
+            continue
+        s, e = (verts[0].x(), verts[0].y()), (verts[-1].x(), verts[-1].y())
+        if (close(s, a) and close(e, b)) or (close(s, b) and close(e, a)):
+            return f
+    return None
+
+
+def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
+    """Create the boundary lines and corner points freshly-imported parcels
+    don't otherwise have, sharing a line between adjoining parcels instead
+    of duplicating it - what Build and Merge both need and an import alone
+    does not create. Returns (lines made, points made).
+
+    shortcut: an imported curved ring (rare - external parcel layers are
+    almost always straight-sided already) is written as a straight chord
+    between its ends, with no recorded radius or arc; re-digitize that
+    boundary with Traverse if it really is a curve. Points and lines are
+    written one at a time, not batched, so an adjoining parcel processed
+    right after always sees a shared corner already made; a very large
+    import will take longer for it.
+    """
+    if not parcel_gids:
+        return 0, 0
+    tol = fabric.tolerance
+    seen = set()
+    gids = [g for g in parcel_gids if g and not (g in seen or seen.add(g))]
+    expr = '"GlobalID" IN (%s)' % ", ".join(quote(g) for g in gids)
+    parcels = list(fabric.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(expr)))
+    lines_made = points_made = 0
+    total = max(len(parcels), 1)
+    for i, p in enumerate(parcels):
+        if progress is not None and i % 25 == 0:
+            progress(i / total)
+        record_gid = p["CreatedByRecord"]
+        for ext, holes in polygon_rings(p.geometry()):
+            for ring in [ext] + list(holes):
+                for seg in ring:
+                    a, b = seg[1], seg[-1]
+                    if math.hypot(a[0] - b[0], a[1] - b[1]) <= tol:
+                        continue
+                    pa, had_a = _resolve_point(fabric, a, record_gid)
+                    pb, had_b = _resolve_point(fabric, b, record_gid)
+                    points_made += (0 if had_a else 1) + (0 if had_b else 1)
+                    if pa == pb or _existing_line(fabric, ptype, a, b, tol) is not None:
+                        continue
+                    nf = _new_line(fabric, fabric.lines, [a, b], ptype, record_gid)
+                    if not fabric.lines.dataProvider().addFeatures([nf])[0]:
+                        raise RuntimeError("Could not write a fabric line while deriving lines.")
+                    lines_made += 1
+    fabric.points.reload()
+    fabric.lines.reload()
+    return lines_made, points_made
+
+
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
                         split_history=True, parent_suffix=0, separator=None, digits=None,
                         book="", page="", progress=None):
@@ -617,7 +701,10 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     ``parent_suffix`` says otherwise); see _link_splits. ``separator`` and ``digits``
     come from fabric settings when omitted: a hyphen and 3 digits read 12345-002, and
     a hyphen still reads a Florida strap. Every imported parcel is current: nothing is
-    retired. CalculatedArea is the map area. No lines or points are created. A strap fills the section
+    retired. CalculatedArea is the map area. Boundary lines and corner points are traced
+    from each parcel's polygon afterwards (see derive_lines_and_points), shared between
+    adjoining parcels rather than duplicated, so Build, Merge and Split have something to
+    work with. A strap fills the section
     fields; any other id is stored as typed. A parcel with several polygons,
     including true curves, is stored as one multi-surface, also when the layer has
     one feature per polygon. A number that is all zeros is no number. A GeoPackage that
@@ -667,7 +754,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     backup = None
     convert_error = None
     target, fields = fabric.parcels, fabric.parcels.fields()
-    pending, made, by_number, stems = [], [], {}, set()
+    pending, made, by_number, stems, all_gids = [], [], {}, set(), []
     blank_gid = None
     foot = _foot(fabric)
 
@@ -808,6 +895,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             if i >= 0:
                 nf.setAttribute(i, value)
         batch.append(nf)
+        all_gids.append(base["GlobalID"])
         if number:
             used.add(number)
             mine.setdefault(number, [base["GlobalID"], list(parts)])
@@ -835,6 +923,8 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         _tell(progress, 92, "Linking split history")
         linked = _link_splits(fabric, ptype, _suffix_int(parent_suffix), stems, separator, digits)
         target.reload()
+    _tell(progress, 93, "Tracing parcel boundaries")
+    lines_made, points_made = derive_lines_and_points(fabric, ptype, all_gids)
     record_ids = [] if record else list(made)
     date_ids = []
     if copied and record:
@@ -857,7 +947,8 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     _tell(progress, 100, "Import finished")
     return {"plat": result["plat"], "copied": copied, "skipped": skipped, "backup": backup, "multipart_note": convert_error,
             "records": len(record_ids), "record_ids": record_ids,
-            "history_linked": linked, "joined": len(joined), "overlapping": overlapping}
+            "history_linked": linked, "joined": len(joined), "overlapping": overlapping,
+            "lines_made": lines_made, "points_made": points_made}
 
 
 def _write_features(layer, batch):

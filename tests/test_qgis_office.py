@@ -225,8 +225,13 @@ class OfficeTests(_Base):
         self.assertEqual(out["copied"], 3)
         self.assertEqual(out["skipped"]["same"], 1)
         self.assertEqual(out["skipped"]["too_long"], 1)
-        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 0)
-        self.assertEqual(sum(1 for _ in self.fab.points.getFeatures()), 0)
+        # the two adjoining parcels (100x200 and 80x200, sharing one side) and the
+        # isolated 60x40 one: 7 + 4 unique lines, 6 + 4 unique points - the shared
+        # side is traced once, not duplicated by both parcels that border it.
+        self.assertEqual(out["lines_made"], 11)
+        self.assertEqual(out["points_made"], 10)
+        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 11)
+        self.assertEqual(sum(1 for _ in self.fab.points.getFeatures()), 10)
         saved = self.fab.record_by_id(rec)
         self.assertFalse(saved["Book"])
         self.assertFalse(saved["Page"])
@@ -262,6 +267,41 @@ class OfficeTests(_Base):
         blank = X.import_parcel_layer(
             self.fab, stamped, "Tax", number_field="PIN", split_history=False)
         self.assertEqual(blank["copied"], 0)
+
+    def test_imported_adjoining_parcels_can_be_merged(self):
+        # Merge (like Build) needs boundary lines, not just the parcel polygons - this is
+        # what was missing before import derived them: two adjoining imported parcels could
+        # not be merged because there were no lines for Build to find a closed loop in.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+
+        def feat(geom, pin):
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            return f
+
+        lyr.dataProvider().addFeatures([
+            feat(box(X0, Y0, X0 + 100, Y0 + 200), "100-001"),
+            feat(box(X0 + 100, Y0, X0 + 180, Y0 + 200), "100-002"),
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        out = X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN")
+        self.assertEqual(out["copied"], 2)
+        self.assertEqual(out["lines_made"], 7)    # 4 + 4 sides, one shared
+        self.assertEqual(out["points_made"], 6)   # 4 + 4 corners, two shared
+        by_num = {f["ParcelNumber"]: f for f in self.fab.parcels.getFeatures()}
+        parents = [by_num["100-001"], by_num["100-002"]]
+        res = E.merge_parcels(self.fab, parents, self.rec)
+        self.assertEqual(len(res.children), 1)
+        merged = next(self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL')))
+        self.assertAlmostEqual(merged.geometry().area(), 100 * 200 + 80 * 200, places=3)
+        self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL'))), 1)
 
     def test_import_files_a_record_per_parcel_and_split_history(self):
         from qgis.PyQt.QtCore import QVariant
@@ -305,7 +345,9 @@ class OfficeTests(_Base):
         self.assertEqual(out["copied"], 10)
         self.assertEqual(out["records"], 10)
         self.assertEqual(out["history_linked"], 4)
-        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 0)
+        # all 10 parcels are isolated (spaced 20 apart, well over tolerance): 4 sides/corners each
+        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures()), 40)
+        self.assertEqual(sum(1 for _ in self.fab.points.getFeatures()), 40)
 
         by_pid = {}
         for rec in self.fab.records.getFeatures():

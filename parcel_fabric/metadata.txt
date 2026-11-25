@@ -3,7 +3,7 @@ name=Parcel Fabric
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=A records-driven parcel fabric for QGIS: enter plats and deeds as COGO traverses, build parcels and lots with true curves, and track every parcel to the record that created it.
-version=0.10.7
+version=0.10.8
 author=Charles
 email=pwizzle77@gmail.com
 about=Parcel Fabric brings the ArcGIS Pro parcel fabric workflow to QGIS. Every line, point and parcel belongs to the legal record (plat, deed, survey) that created it. Enter courses by hand or paste a metes-and-bounds description, check closure, write COGO-attributed lines with true circular arcs, then Build turns closed loops into parcel polygons and corner points with misclose and area computed from the record dimensions. Check Fabric finds open loops, missing COGO and poor closures. Works in a GeoPackage or any database QGIS connects to (PostgreSQL/PostGIS, SQL Server, Oracle). Field names match the ArcGIS Pro parcel fabric so data moves between them. Pure Python, no external dependencies. Independent of Esri.
@@ -11,6 +11,7 @@ tracker=https://github.com/pwizzle77-cmd/qgis_parcel_fabric/issues
 repository=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 homepage=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 changelog=
+    0.10.8 - Import Parcels now traces each parcel's boundary lines and corner points afterwards, sharing a line between adjoining parcels instead of duplicating it, so Build, Merge and Split have something to work with - importing used to leave parcels with no lines at all, so two imported parcels that shared a side could not be merged ("couldn't be built").
     0.10.7 - Split Parcel: a click to start or end the cut line near the selected parcel's own edge (not only at an existing corner) now lands exactly on it, instead of being rejected as not reaching the boundary; the window explains how to cut a square or a section out of one side, not just straight across. Check Fabric no longer flags a shared edge digitized a hair apart (well inside tolerance) as an overlap - only a sliver wide enough to be a real one, matching how Align Edge already treats it.
     0.10.6 - Records and every fabric feature now record which user created or retired them (CreatedByUser/RetiredByUser/EditUser), filed documents get a SHA-256 recorded at filing time so a later mismatch is flagged before you open one, Parcel Lineage/History say plainly when a family's history is larger than what's shown instead of quietly cutting it off, a new record with no parcel id fills it in from the parcel Build gives it once every parcel it created shares one, fabrics now record which plugin version last opened them, and a new Parcel Report makes a one-page handout (area, record, lineage, footprint) for one parcel.
     0.10.5 - A parcel takes the lot that fits it best, not also the government lot around it, and new fabrics have longer Lot and Block fields so names aren't cut short

@@ -297,12 +297,12 @@ def table_specs(prefix, multipart=True):
         (ROLE_PARCELS, table_name(prefix, ROLE_PARCELS),
          W.MultiSurface if multipart else W.CurvePolygon, PARCEL_FIELDS),
         (ROLE_LINES, table_name(prefix, ROLE_LINES), W.CompoundCurve, LINE_FIELDS),
-        (ROLE_LOTS, table_name(prefix, ROLE_LOTS),
-         W.MultiSurface if multipart else W.CurvePolygon, LOT_FIELDS),
-        (ROLE_BLOCKS, table_name(prefix, ROLE_BLOCKS),
-         W.MultiSurface if multipart else W.CurvePolygon, BLOCK_FIELDS),
-        (ROLE_SUBDIVISIONS, table_name(prefix, ROLE_SUBDIVISIONS),
-         W.MultiSurface if multipart else W.CurvePolygon, SUBDIVISION_FIELDS),
+        # Lots, Blocks and Subdivisions are reference labels, not COGO parcels (no
+        # curves, no multi-polygon restriction tied to the parcel fabric's own
+        # provider limits) - always plain MultiPolygon, like Records' own footprint.
+        (ROLE_LOTS, table_name(prefix, ROLE_LOTS), W.MultiPolygon, LOT_FIELDS),
+        (ROLE_BLOCKS, table_name(prefix, ROLE_BLOCKS), W.MultiPolygon, BLOCK_FIELDS),
+        (ROLE_SUBDIVISIONS, table_name(prefix, ROLE_SUBDIVISIONS), W.MultiPolygon, SUBDIVISION_FIELDS),
         (ROLE_LINEAGE, table_name(prefix, ROLE_LINEAGE), W.NoGeometry, LINEAGE_FIELDS),
     ]
 

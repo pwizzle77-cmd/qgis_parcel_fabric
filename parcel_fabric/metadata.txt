@@ -3,7 +3,7 @@ name=Parcel Fabric
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=A records-driven parcel fabric for QGIS: enter plats and deeds as COGO traverses, build parcels and lots with true curves, and track every parcel to the record that created it.
-version=0.10.10
+version=0.10.11
 author=Charles
 email=pwizzle77@gmail.com
 about=Parcel Fabric brings the ArcGIS Pro parcel fabric workflow to QGIS. Every line, point and parcel belongs to the legal record (plat, deed, survey) that created it. Enter courses by hand or paste a metes-and-bounds description, check closure, write COGO-attributed lines with true circular arcs, then Build turns closed loops into parcel polygons and corner points with misclose and area computed from the record dimensions. Check Fabric finds open loops, missing COGO and poor closures. Works in a GeoPackage or any database QGIS connects to (PostgreSQL/PostGIS, SQL Server, Oracle). Field names match the ArcGIS Pro parcel fabric so data moves between them. Pure Python, no external dependencies. Independent of Esri.
@@ -11,6 +11,7 @@ tracker=https://github.com/pwizzle77-cmd/qgis_parcel_fabric/issues
 repository=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 homepage=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 changelog=
+    0.10.11 - Import Lots, Subdivisions and Blocks no longer drop a multi-part shape as "more than one polygon": these tables are reference labels, not parcels, so a new fabric now always makes them plain multi-polygon (like Records' own footprint already was), and on an older fabric whose table still holds one polygon per row, a multi-part shape imports as several same-named rows instead of being skipped.
     0.10.10 - New Fabric on SQL Server no longer fails with "Invalid object name 'geometry_columns'" on a plain new database (one not set up by ArcSDE or similar): QGIS looks up spatial tables by querying an OGC-style geometry_columns table, falling back to scanning sys.columns, as one query - so a database with neither fails that lookup outright, on something as simple as checking a table exists yet. An empty geometry_columns table is now created first if needed.
     0.10.9 - Split, Divide, Merge, Separate, Copy Parallel, Subdivide Block and Stacked Unit can set the active record straight from the parcel(s) you've selected ("Use selected parcel's record"), instead of requiring a trip to the Records panel first. Fabric Settings > Maintenance: Create Indexes (on the fields every current-parcel query filters or joins by), Update Statistics and Reclaim Space, for a fabric that only grows (nothing is ever deleted). New Create Missing Lines and Points tool: the same boundary tracing Import Parcels does for new rows, run on parcels already in the fabric that don't have it (an older import, from before 0.10.8, say).
     0.10.8 - Import Parcels now traces each parcel's boundary lines and corner points afterwards, sharing a line between adjoining parcels instead of duplicating it, so Build, Merge and Split have something to work with - importing used to leave parcels with no lines at all, so two imported parcels that shared a side could not be merged ("couldn't be built").

@@ -620,6 +620,32 @@ class OfficeTests(_Base):
         self.assertEqual(sorted(f["Lot"] for f in saved), ["10", "11"])
         self.assertTrue(all(f["Subdivision"] == "OAKS" and f["Block"] == "2" for f in saved))
         self.assertTrue(all(f["ParcelNumber"] == "12-4S-16-02942-000" for f in saved))
+
+    def test_a_multipart_subdivision_splits_into_rows_on_a_single_polygon_table(self):
+        # Lots/Blocks/Subdivisions are always multi-polygon on a fabric created now (the fix for
+        # this), but an older SQL Server fabric's table may still be single-polygon-per-row -
+        # a multi-part subdivision must still import, as several same-named rows, not be skipped.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        target = QgsVectorLayer("CurvePolygon?crs=epsg:2238", "subdivisions", "memory")
+        target.dataProvider().addAttributes([QgsField("Name", QVariant.String)])
+        target.updateFields()
+
+        source = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "source", "memory")
+        source.dataProvider().addAttributes([QgsField("NAME", QVariant.String)])
+        source.updateFields()
+        multi = QgsGeometry.collectGeometry([box(X0, Y0, X0 + 50, Y0 + 50), box(X0 + 100, Y0, X0 + 150, Y0 + 50)])
+        f = QgsFeature(source.fields())
+        f.setGeometry(multi)
+        f.setAttribute("NAME", "SPLIT OAKS")
+        source.dataProvider().addFeatures([f])
+
+        out = X._copy_outlines(target, source, lambda feat: {"Name": feat["NAME"]}, label="subdivisions")
+        self.assertEqual(out["copied"], 2)
+        self.assertEqual(out["skipped"]["multipart"], 0)
+        saved = list(target.getFeatures())
+        self.assertEqual([f["Name"] for f in saved], ["SPLIT OAKS", "SPLIT OAKS"])
+        self.assertAlmostEqual(sum(f.geometry().area() for f in saved), 50 * 50 * 2)
         self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures()), before)
         again = X.import_lots(self.fab, lots, "LOT", "SUBDIVISION", "BLOCK", "PARCELNO")
         self.assertEqual(again["copied"], 0)

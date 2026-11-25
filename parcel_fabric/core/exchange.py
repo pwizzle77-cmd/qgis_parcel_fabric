@@ -1026,24 +1026,36 @@ def _copy_outlines(target, source, row_for, progress=None, label="features"):
             body.dropZValue()
             body.dropMValue()
         parts = _surface_parts(prepared)
-        geom = _pack_parcel(target, parts)
-        if not _has_area(geom):
-            skipped["empty" if len(parts) <= 1 else "multipart"] += 1
-            continue
-        if _same_outline(geom, index, held):
-            skipped["same"] += 1
-            continue
-        nf = QgsFeature(fields)
-        nf.setGeometry(geom)
-        for key, value in row_for(feat).items():
-            i = fields.indexOf(key)
-            if i >= 0:
-                nf.setAttribute(i, value)
-        batch.append(nf)
-        remember(geom)
-        if len(batch) >= 1000:
-            copied += _write_features(target, batch)
-            batch = []
+        if not QgsWkbTypes.isMultiType(target.wkbType()) and len(parts) > 1:
+            # a table that stores one polygon per row: import each part of a
+            # multi-part shape as its own row with the same attributes, instead
+            # of dropping the whole feature - right for these reference-label
+            # tables (not fabric parcels), unlike a real parcel's own polygons.
+            part_groups = [[p] for p in parts]
+        else:
+            part_groups = [parts]
+        row_values = None
+        for group in part_groups:
+            geom = _pack_parcel(target, group)
+            if not _has_area(geom):
+                skipped["empty" if len(group) <= 1 else "multipart"] += 1
+                continue
+            if _same_outline(geom, index, held):
+                skipped["same"] += 1
+                continue
+            if row_values is None:
+                row_values = row_for(feat)
+            nf = QgsFeature(fields)
+            nf.setGeometry(geom)
+            for key, value in row_values.items():
+                i = fields.indexOf(key)
+                if i >= 0:
+                    nf.setAttribute(i, value)
+            batch.append(nf)
+            remember(geom)
+            if len(batch) >= 1000:
+                copied += _write_features(target, batch)
+                batch = []
     if batch:
         copied += _write_features(target, batch)
     target.reload()

@@ -590,7 +590,11 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
         raise EditError("%s has an invalid shape (self-intersecting or similar) - run Check Fabric, "
                         "or fix it before merging." % ", ".join(bad))
     union = QgsGeometry.unaryUnion([_seg(p.geometry()).buffer(tol / 2, 2) for p in parents]).buffer(-tol / 2, 2)
-    polys = union.asGeometryCollection() if union.isMultipart() else [union]
+    raw_polys = union.asGeometryCollection() if union.isMultipart() else [union]
+    # The dilate-erode round trip can leave a near-zero-area sliver where two parcels
+    # touch at a reflex corner (a notch cut from one side, say) - not a real extra piece.
+    noise = (tol * tol) / 100
+    polys = [p for p in raw_polys if p.area() > noise] or raw_polys
     gap = 0.0
     if len(polys) > 1:
         gap = min(polys[i].distance(polys[j])

@@ -584,12 +584,23 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
         raise EditError("A selected parcel is already retired (another editor may have just retired it).")
     ptype = types.pop()
     tol = fabric.tolerance
+    bad = [p["ParcelNumber"] or p["Name"] or "#%d" % p.id()
+          for p in parents if not _seg(p.geometry()).isGeosValid()]
+    if bad:
+        raise EditError("%s has an invalid shape (self-intersecting or similar) - run Check Fabric, "
+                        "or fix it before merging." % ", ".join(bad))
     union = QgsGeometry.unaryUnion([_seg(p.geometry()).buffer(tol / 2, 2) for p in parents]).buffer(-tol / 2, 2)
     polys = union.asGeometryCollection() if union.isMultipart() else [union]
     if len(polys) > 1:
         if not apart:
-            raise EditError("The selected parcels don't all touch. Tick \"Join parcels that don't touch\" to make "
-                            "one multi-polygon parcel.")
+            gap = min(polys[i].distance(polys[j])
+                     for i in range(len(polys)) for j in range(i + 1, len(polys)))
+            raise EditError(
+                "The selected parcels don't all touch (the closest two are %.3f map units apart - "
+                "the tolerance is %.3f). If they should be contiguous, close that gap first (Align "
+                "Edge, or Check Fabric to see exactly where). Tick \"Join parcels that don't touch\" "
+                "instead to make one multi-polygon parcel out of genuinely separate pieces."
+                % (gap, tol))
         if not fabric.multipart:
             raise EditError("This fabric stores one polygon per parcel. Turn on multi-polygon parcels in "
                             "Fabric Settings first.")

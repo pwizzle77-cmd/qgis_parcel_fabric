@@ -446,6 +446,31 @@ class OfficeTests(_Base):
         self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures(
             QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL'))), 4)
 
+    def test_merge_reports_the_actual_gap_when_parcels_dont_touch(self):
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+
+        def feat(geom, pin):
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            return f
+
+        lyr.dataProvider().addFeatures([
+            feat(box(X0, Y0, X0 + 100, Y0 + 100), "200-001"),
+            feat(box(X0 + 101, Y0, X0 + 180, Y0 + 100), "200-002"),   # a real 1 ft gap, not a hair
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN")
+        by_num = {f["ParcelNumber"]: f for f in self.fab.parcels.getFeatures()}
+        parents = [by_num["200-001"], by_num["200-002"]]
+        with self.assertRaisesRegex(E.EditError, r"don't all touch \(the closest two are 1\.000") as ctx:
+            E.merge_parcels(self.fab, parents, self.rec)
+        self.assertIn("tolerance is 0.01", str(ctx.exception))
+
     def test_import_snaps_a_shared_edge_a_hair_apart(self):
         # The shared side sits 0.009 ft apart, across a snap-grid cell, still inside
         # the 0.01 tolerance. It is one line and two corners, not a second copy.

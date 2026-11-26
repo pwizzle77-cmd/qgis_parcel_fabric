@@ -488,15 +488,17 @@ class ExchangeDialog(QDialog):
                      edited_field=self.edited_field.currentField() or None,
                      parcel_id_field=self.pid_field.currentField() or None)
         self._importing = True
+        self._say("Scanning the source layer against the fabric...")
         try:
             preview = X.sync_parcel_layer(self.fab, src, self.layer_type.currentText(), rid,
-                                          number_field, dry_run=True, **kwargs)
+                                          number_field, dry_run=True, progress=self._progress, **kwargs)
         except Exception as e:
-            self._importing = False
+            self._end_progress()
             QMessageBox.critical(self, self.windowTitle(), "Sync preview failed: %s" % e)
             return
-        self._importing = False
+        self._end_progress()
         if not (preview["missing"] or preview["new"] or preview["changed"]):
+            self._say("Nothing to sync - every parcel number matches.")
             QMessageBox.information(self, self.windowTitle(), "Nothing to sync - every parcel number matches.")
             return
         lines = ["%d parcel(s) will be retired (no longer in the source)." % len(preview["missing"])
@@ -510,6 +512,7 @@ class ExchangeDialog(QDialog):
         if QMessageBox.question(self, "Sync Parcels", msg) != QMessageBox.StandardButton.Yes:
             return
         self._importing = True
+        self._say("Syncing...")
         try:
             result = X.sync_parcel_layer(self.fab, src, self.layer_type.currentText(), rid,
                                          number_field, progress=self._progress, **kwargs)

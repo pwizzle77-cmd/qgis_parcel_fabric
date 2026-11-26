@@ -3,7 +3,7 @@ name=Parcel Fabric
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=A records-driven parcel fabric for QGIS: enter plats and deeds as COGO traverses, build parcels and lots with true curves, and track every parcel to the record that created it.
-version=0.10.19
+version=0.10.20
 author=Charles
 email=pwizzle77@gmail.com
 about=Parcel Fabric brings the ArcGIS Pro parcel fabric workflow to QGIS. Every line, point and parcel belongs to the legal record (plat, deed, survey) that created it. Enter courses by hand or paste a metes-and-bounds description, check closure, write COGO-attributed lines with true circular arcs, then Build turns closed loops into parcel polygons and corner points with misclose and area computed from the record dimensions. Check Fabric finds open loops, missing COGO and poor closures. Works in a GeoPackage or any database QGIS connects to (PostgreSQL/PostGIS, SQL Server, Oracle). Field names match the ArcGIS Pro parcel fabric so data moves between them. Pure Python, no external dependencies. Independent of Esri.
@@ -11,6 +11,7 @@ tracker=https://github.com/pwizzle77-cmd/qgis_parcel_fabric/issues
 repository=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 homepage=https://github.com/pwizzle77-cmd/qgis_parcel_fabric
 changelog=
+    0.10.20 - Sync Parcels shows a progress bar and what it's doing while it scans the source layer and the fabric's current parcels for its preview, not just during the import step afterward - so it no longer looks stuck on a big layer.
     0.10.19 - Import / Export > Parcel layer has a Sync... button: for running a county's own GIS and this fabric side by side during a migration, instead of a full reimport each time. It retires a current parcel whose number has dropped out of the source, imports one that's newly there, and reports - without touching - one whose outline moved in the source, so a real split, merge or resurvey still goes through the proper tool. Previews the counts before anything is retired or imported.
     0.10.18 - Split, Divide, Merge, Separate, Copy Parallel, Subdivide Block and Stacked Unit have a New Record... button next to the active-record label: file the plat, deed or agreement behind the edit - book, page, and a scan or link - without leaving the window first, instead of only being able to reuse a parcel's existing record.
     0.10.17 - Build, Split and Merge write a straight MultiPolygon for SQL Server (not the curved MultiSurface/CurvePolygon WKT SQL Server's geometry type flatly rejects) - a curved parcel could not be rebuilt there at all. Saving several fabric tables together (a merge's parent parcels retired, lines retired, new parcel added) on SQL Server or PostgreSQL now happens in one database transaction, so a write that fails partway through - as the geometry problem above did - rolls every table in that edit back, instead of leaving retired parents with no replacement parcel to show for it.

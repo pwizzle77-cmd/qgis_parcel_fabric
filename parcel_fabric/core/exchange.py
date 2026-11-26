@@ -1237,7 +1237,13 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
     _tell(progress, 40, "Sync: reading the fabric's current parcels")
     fabric_parts, fabric_fids = {}, {}
     expr = '%s AND %s AND ("IsSeed" IS NULL OR "IsSeed" = 0)' % (type_expr(ptype), CURRENT)
+    f_total = fabric.parcels.featureCount()
+    f_seen = 0
     for f in fabric.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(expr)):
+        f_seen += 1
+        if f_total and (f_seen % 200 == 0 or f_seen == f_total):
+            _tell(progress, min(49.0, 40.0 + 9.0 * f_seen / float(f_total)),
+                  "Sync: reading the fabric's current parcels: %d of %d" % (f_seen, f_total))
         number = f["ParcelNumber"]
         if not number:
             continue

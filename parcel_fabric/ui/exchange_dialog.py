@@ -196,9 +196,18 @@ class ExchangeDialog(QDialog):
         self.stack.addWidget(self._blocks_page())
         self.stack.addWidget(self._sub_page())
         lay.addWidget(self.stack)
+        btn_row = QHBoxLayout()
         b = QPushButton("Import")
         b.clicked.connect(self._import_layer)
-        lay.addWidget(b)
+        btn_row.addWidget(b)
+        self.sync_btn = QPushButton("Sync...")
+        self.sync_btn.setToolTip("Retire a current parcel whose number is no longer in the source, "
+                                 "import one that's new, and report (without touching) one whose "
+                                 "outline changed - for running a county's own system and this "
+                                 "fabric side by side during a migration.")
+        self.sync_btn.clicked.connect(self._sync_layer)
+        btn_row.addWidget(self.sync_btn)
+        lay.addLayout(btn_row)
         self._file_layer = None
         self.src_layer.layerChanged.connect(self._use_map_layer)
         self._use_map_layer(self.src_layer.currentLayer())
@@ -309,6 +318,7 @@ class ExchangeDialog(QDialog):
         names = ["Parcels", "Lots", "Blocks", "Subdivisions"]
         self.stack.setCurrentIndex(names.index(name) if name in names else 0)
         self.layer_info.setText(_LAYER_INFO.get(name, _LAYER_INFO["Parcels"]) + _PLAT_INFO)
+        self.sync_btn.setVisible(name == "Parcels")
 
     def _bind_fields(self, layer):
         for box, names in self._field_boxes:
@@ -446,6 +456,75 @@ class ExchangeDialog(QDialog):
                       % result["backup"])
         elif skipped.get("multipart") and result.get("multipart_note"):
             self._say(result["multipart_note"])
+
+    def _sync_layer(self):
+        if self._importing:
+            return
+        if self.fab is None:
+            QMessageBox.warning(self, self.windowTitle(), "Open a fabric first.")
+            return
+        src = self._file_layer if self._file_layer is not None else self.src_layer.currentLayer()
+        if src is None:
+            QMessageBox.warning(self, self.windowTitle(), "Choose a polygon layer.")
+            return
+        number_field = self.num_field.currentField()
+        if not number_field:
+            QMessageBox.warning(self, self.windowTitle(), "Choose the parcel number field - "
+                                "sync matches a parcel by its number.")
+            return
+        rid = self._record()
+        if not rid:
+            return
+        try:
+            sep, digits, parent = clean_pattern(
+                self.num_sep.text(), self.num_digits.value(), self.num_parent.text())
+        except NumberError as e:
+            QMessageBox.warning(self, self.windowTitle(), str(e))
+            return
+        kwargs = dict(date_field=self.date_field.currentField() or None,
+                     split_history=self.history.isChecked(), parent_suffix=parent,
+                     separator=sep, digits=digits,
+                     created_field=self.created_field.currentField() or None,
+                     edited_field=self.edited_field.currentField() or None,
+                     parcel_id_field=self.pid_field.currentField() or None)
+        self._importing = True
+        try:
+            preview = X.sync_parcel_layer(self.fab, src, self.layer_type.currentText(), rid,
+                                          number_field, dry_run=True, **kwargs)
+        except Exception as e:
+            self._importing = False
+            QMessageBox.critical(self, self.windowTitle(), "Sync preview failed: %s" % e)
+            return
+        self._importing = False
+        if not (preview["missing"] or preview["new"] or preview["changed"]):
+            QMessageBox.information(self, self.windowTitle(), "Nothing to sync - every parcel number matches.")
+            return
+        lines = ["%d parcel(s) will be retired (no longer in the source)." % len(preview["missing"])
+                if preview["missing"] else None,
+                "%d parcel(s) will be imported (new in the source)." % len(preview["new"])
+                if preview["new"] else None,
+                "%d parcel(s) have a changed outline and will be left alone - review them after."
+                % len(preview["changed"]) if preview["changed"] else None]
+        msg = "\n".join(line for line in lines if line) + "\n\nUnder record %s. Continue?" % (
+            self.fab.record_by_id(rid)["Name"] or rid)
+        if QMessageBox.question(self, "Sync Parcels", msg) != QMessageBox.StandardButton.Yes:
+            return
+        self._importing = True
+        try:
+            result = X.sync_parcel_layer(self.fab, src, self.layer_type.currentText(), rid,
+                                         number_field, progress=self._progress, **kwargs)
+        except Exception as e:
+            self._end_progress()
+            QMessageBox.critical(self, self.windowTitle(), "Sync failed: %s" % e)
+            return
+        self._end_progress()
+        self.manager.refresh()
+        self.iface.mapCanvas().refresh()
+        bits = ["Synced: %d retired, %d imported." % (result["retired"], result["copied"])]
+        if result["changed"]:
+            bits.append("%d existing parcel(s) have a changed outline and were left alone: %s." % (
+                len(result["changed"]), ", ".join(c["number"] for c in result["changed"])))
+        self._say(" ".join(bits))
 
     # ------------------------------------------------------------------
     def _pro_tab(self):

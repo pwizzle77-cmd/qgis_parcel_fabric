@@ -24,6 +24,7 @@ from tests.test_qgis import X0, Y0, _Base, courses
 
 from parcel_fabric.core import edits as E
 from parcel_fabric.core import exchange as X
+from parcel_fabric.core.exchange import sync_parcel_layer
 from parcel_fabric.core import numbering as N
 from parcel_fabric.core import styles
 from parcel_fabric.core import units as U
@@ -524,6 +525,112 @@ class OfficeTests(_Base):
         E.merge_parcels(self.fab, parents, self.rec)
         merged = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
         self.assertAlmostEqual(merged.geometry().area(), whole.area(), places=3)
+
+    @staticmethod
+    def _county_layer(rows):
+        from qgis.core import QgsField
+        from qgis.PyQt.QtCore import QVariant
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+        feats = []
+        for geom, pin in rows:
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            feats.append(f)
+        lyr.dataProvider().addFeatures(feats)
+        return lyr
+
+    def test_sync_retires_a_parcel_missing_from_the_source(self):
+        first = self._county_layer([
+            (box(X0, Y0, X0 + 100, Y0 + 100), "400-001"),
+            (box(X0 + 100, Y0, X0 + 200, Y0 + 100), "400-002"),
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        later = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "400-001")])  # 400-002 dropped
+        res = sync_parcel_layer(self.fab, later, "Tax", self.rec, "PIN")
+        self.assertEqual(res["retired"], 1)
+        self.assertEqual(res["missing"], ["400-002"])
+        current = {f["ParcelNumber"] for f in self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression(CURRENT))}
+        self.assertEqual(current, {"400-001"})
+
+    def test_sync_adds_a_parcel_new_in_the_source(self):
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "401-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        later = self._county_layer([
+            (box(X0, Y0, X0 + 100, Y0 + 100), "401-001"),
+            (box(X0 + 100, Y0, X0 + 200, Y0 + 100), "401-002"),   # new
+        ])
+        res = sync_parcel_layer(self.fab, later, "Tax", self.rec, "PIN")
+        self.assertEqual(res["copied"], 1)
+        self.assertEqual(res["retired"], 0)
+        current = {f["ParcelNumber"] for f in self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression(CURRENT))}
+        self.assertEqual(current, {"401-001", "401-002"})
+
+    def test_sync_flags_a_changed_outline_instead_of_touching_it(self):
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "402-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        before = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT))).geometry()
+        later = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 150), "402-001")])   # resurveyed bigger
+        res = sync_parcel_layer(self.fab, later, "Tax", self.rec, "PIN")
+        self.assertEqual(res["changed"], [{"number": "402-001", "old_area": 10000.0, "new_area": 15000.0}])
+        after = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT))).geometry()
+        self.assertAlmostEqual(after.area(), before.area(), places=3)   # untouched
+
+    def test_sync_dry_run_previews_without_changing_anything(self):
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "404-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        later = self._county_layer([(box(X0 + 100, Y0, X0 + 200, Y0 + 100), "404-002")])  # 001 dropped, 002 new
+        res = sync_parcel_layer(self.fab, later, "Tax", None, "PIN", dry_run=True)
+        self.assertEqual(res, {"missing": ["404-001"], "new": ["404-002"], "changed": []})
+        current = {f["ParcelNumber"] for f in self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression(CURRENT))}
+        self.assertEqual(current, {"404-001"})   # nothing actually happened
+
+    def test_sync_refuses_to_retire_without_an_active_record(self):
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "403-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        later = self._county_layer([])
+        with self.assertRaisesRegex(RuntimeError, "no longer in the source"):
+            sync_parcel_layer(self.fab, later, "Tax", None, "PIN")
+
+    def test_sync_button_in_the_exchange_dialog_runs_end_to_end(self):
+        from unittest.mock import Mock, patch
+        from qgis.gui import QgsMapCanvas
+        from qgis.PyQt.QtWidgets import QWidget
+        from parcel_fabric.ui.exchange_dialog import ExchangeDialog
+
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "405-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        later = self._county_layer([(box(X0 + 100, Y0, X0 + 200, Y0 + 100), "405-002")])  # 001 dropped, 002 new
+
+        win, iface = QWidget(), Mock()
+        iface.mainWindow.return_value, iface.mapCanvas.return_value = win, QgsMapCanvas()
+        mgr = SimpleNamespace(active=self.fab, active_record_id=self.rec,
+                              active_record=lambda: self.fab.record_by_id(self.rec), refresh=Mock())
+        from parcel_fabric.ui import exchange_dialog as EX
+        with patch.object(EX.QMessageBox, "question", return_value=EX.QMessageBox.StandardButton.Yes), \
+                patch.object(EX.QMessageBox, "warning", side_effect=lambda *x: self.fail(x[2])), \
+                patch.object(EX.QMessageBox, "critical", side_effect=lambda *x: self.fail(x[2])):
+            dlg = ExchangeDialog(iface, mgr)
+            dlg._file_layer = later
+            dlg.num_field.setLayer(later)
+            dlg.num_field.setField("PIN")
+            dlg.layer_type.setCurrentText("Tax")
+            dlg._sync_layer()
+            dlg.close()
+        current = {f["ParcelNumber"] for f in self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression(CURRENT))}
+        self.assertEqual(current, {"405-002"})
 
     def test_import_snaps_a_shared_edge_a_hair_apart(self):
         # The shared side sits 0.009 ft apart, across a snap-grid cell, still inside

@@ -591,10 +591,12 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
                         "or fix it before merging." % ", ".join(bad))
     union = QgsGeometry.unaryUnion([_seg(p.geometry()).buffer(tol / 2, 2) for p in parents]).buffer(-tol / 2, 2)
     polys = union.asGeometryCollection() if union.isMultipart() else [union]
+    gap = 0.0
     if len(polys) > 1:
+        gap = min(polys[i].distance(polys[j])
+                 for i in range(len(polys)) for j in range(i + 1, len(polys)))
+    if gap > tol:
         if not apart:
-            gap = min(polys[i].distance(polys[j])
-                     for i in range(len(polys)) for j in range(i + 1, len(polys)))
             raise EditError(
                 "The selected parcels don't all touch (the closest two are %.3f map units apart - "
                 "the tolerance is %.3f). If they should be contiguous, close that gap first (Align "

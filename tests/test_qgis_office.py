@@ -471,6 +471,36 @@ class OfficeTests(_Base):
             E.merge_parcels(self.fab, parents, self.rec)
         self.assertIn("tolerance is 0.01", str(ctx.exception))
 
+    def test_merge_joins_a_parcel_cut_from_the_side_of_its_neighbor(self):
+        # A notch cut out of one side (not fully enclosed) touches the parent
+        # along three edges. The old touch-check could still call that
+        # "don't touch" even at zero gap - make sure it doesn't any more.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+
+        def feat(geom, pin):
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            return f
+
+        whole = box(X0, Y0, X0 + 200, Y0 + 100)
+        notch = box(X0 + 50, Y0, X0 + 100, Y0 + 40)
+        lyr.dataProvider().addFeatures([
+            feat(whole.difference(notch), "300-001"),
+            feat(notch, "300-004"),
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN")
+        by_num = {f["ParcelNumber"]: f for f in self.fab.parcels.getFeatures()}
+        parents = [by_num["300-001"], by_num["300-004"]]
+        E.merge_parcels(self.fab, parents, self.rec)
+        merged = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+        self.assertAlmostEqual(merged.geometry().area(), whole.area(), places=3)
+
     def test_import_snaps_a_shared_edge_a_hair_apart(self):
         # The shared side sits 0.009 ft apart, across a snap-grid cell, still inside
         # the 0.01 tolerance. It is one line and two corners, not a second copy.

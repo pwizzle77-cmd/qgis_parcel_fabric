@@ -38,6 +38,29 @@ def curve_segments(curve):
     return out
 
 
+def match_wkb_type(want, g):
+    """``g`` reshaped (curved/straight, single/multi) to fit a layer's own wkb type ``want``.
+
+    MultiPolygon cannot store a curve: convertToMultiType would turn a CurvePolygon
+    into MultiSurface, and SQL Server rejects that WKT outright. ``None`` if a
+    multi-part geometry can't be squeezed into a single-part field.
+    """
+    from qgis.core import QgsWkbTypes
+    g = QgsGeometry(g)
+    if not QgsWkbTypes.isCurvedType(want):
+        g.convertToStraightSegment()
+    if g.isMultipart() and not QgsWkbTypes.isMultiType(want):
+        parts = parts_of(g)
+        if len(parts) != 1:
+            return None
+        g = parts[0]
+    if QgsWkbTypes.isCurvedType(want) and not g.constGet().hasCurvedSegments():
+        g = QgsGeometry(g.constGet().toCurveType())
+    if QgsWkbTypes.isMultiType(want):
+        g.convertToMultiType()
+    return g
+
+
 def parts_of(geom):
     """The polygons of a parcel, curves kept."""
     g = geom.constGet()

@@ -27,7 +27,7 @@ from . import units as U
 from .build import build_parcels, update_record_footprint
 from .edits import _new_line
 from .fabric import CURRENT, EditSession, quote, type_expr
-from .geomio import parts_of, polygon_rings
+from .geomio import match_wkb_type, parts_of, polygon_rings
 
 # a few field names that differ between Pro versions / exports
 ALIASES = {"RecordedDate": ["RecordedDate", "RecordDate", "Recorded_Date", "DateRecorded"],
@@ -73,22 +73,7 @@ def _geom_for(target, g, xf):
     a = g.get()
     a.dropZValue()
     a.dropMValue()
-    want = target.wkbType()
-    from qgis.core import QgsWkbTypes
-    # MultiPolygon cannot store a curve. convertToMultiType would turn a
-    # CurvePolygon into MultiSurface, and SQL Server rejects that WKT.
-    if not QgsWkbTypes.isCurvedType(want):
-        g.convertToStraightSegment()
-    if g.isMultipart() and not QgsWkbTypes.isMultiType(want):
-        parts = parts_of(g)
-        if len(parts) != 1:
-            return None
-        g = parts[0]
-    if QgsWkbTypes.isCurvedType(want) and not g.constGet().hasCurvedSegments():
-        g = QgsGeometry(g.constGet().toCurveType())
-    if QgsWkbTypes.isMultiType(want):
-        g.convertToMultiType()
-    return g
+    return match_wkb_type(target.wkbType(), g)
 
 
 def _tell(progress, pct, text=None):

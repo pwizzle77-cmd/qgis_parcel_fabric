@@ -27,7 +27,7 @@ from parcel_fabric.core import exchange as X
 from parcel_fabric.core import numbering as N
 from parcel_fabric.core import styles
 from parcel_fabric.core import units as U
-from parcel_fabric.core.build import build_parcels
+from parcel_fabric.core.build import _parcel_geometry, build_parcels
 from parcel_fabric.core.fabric import CURRENT, EditSession
 from parcel_fabric.core.geomio import fit_gap, polygon_rings
 from parcel_fabric.core.qa import neighbor_issues, run_checks
@@ -64,6 +64,30 @@ class NeighborTests(unittest.TestCase):
         curved = QgsVectorLayer("CurvePolygon?crs=epsg:2238", "parcels", "memory")
         kept = X._pack_parcel(curved, [QgsGeometry(poly.clone())])
         self.assertTrue(QgsWkbTypes.isCurvedType(kept.wkbType()))
+
+    def test_build_writes_a_straight_multipolygon_for_a_curved_parcel_on_sql_server(self):
+        # Build/Split/Merge used to always hand back a curved QgsMultiSurface and
+        # trust the caller to straighten it for SQL Server - nothing did, so a
+        # merged or rebuilt parcel with any curve in it failed to save there.
+        from types import SimpleNamespace
+        from qgis.core import (
+            QgsCircularString, QgsCompoundCurve, QgsCurvePolygon,
+            QgsLineString, QgsPoint, QgsVectorLayer, QgsWkbTypes,
+        )
+        a, b = QgsPoint(X0, Y0), QgsPoint(X0, Y0 + 100)
+        c, d = QgsPoint(X0 + 100, Y0 + 100), QgsPoint(X0 + 100, Y0)
+        ring = QgsCompoundCurve()
+        ring.addCurve(QgsLineString([a, b]))
+        ring.addCurve(QgsCircularString(b, QgsPoint(X0 + 50, Y0 + 140), c))
+        ring.addCurve(QgsLineString([c, d, a]))
+        poly = QgsCurvePolygon()
+        poly.setExteriorRing(ring)
+        sql_server_parcels = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "parcels", "memory")
+        fake_fabric = SimpleNamespace(multipart=True, parcels=sql_server_parcels)
+        geom = _parcel_geometry(fake_fabric, [poly])
+        self.assertTrue(geom.asWkt().startswith("MultiPolygon"))
+        self.assertNotIn("Curve", geom.asWkt())
+        self.assertGreater(geom.area(), 100 * 100)
 
     def test_default_style_hides_dense_layers_until_zoomed_in(self):
         from qgis.core import QgsVectorLayer

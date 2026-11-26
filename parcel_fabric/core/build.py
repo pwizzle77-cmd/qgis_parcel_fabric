@@ -36,7 +36,7 @@ from qgis.core import (
 from . import schema as S
 from .cogo import loop_misclose
 from .fabric import CURRENT, EditSession, Fabric, type_expr
-from .geomio import parts_of
+from .geomio import match_wkb_type, parts_of
 from .topo import chain_ring
 
 
@@ -519,16 +519,24 @@ def _cogo_values(loops, complete=True):
 
 
 def _parcel_geometry(fabric, polys):
-    """A Parcels geometry from curve polygons."""
+    """A Parcels geometry from curve polygons, shaped to fit the Parcels layer's own wkb type.
+
+    Always building a curved QgsMultiSurface here and relying on the caller to
+    straighten it doesn't happen - so on SQL Server (whose Parcels field is plain
+    MultiPolygon) this used to try to write a MultiSurface/CurvePolygon WKT, which
+    the SQL Server geometry type rejects outright.
+    """
     if not fabric.multipart:
         if len(polys) != 1:
             raise ValueError("This fabric stores one polygon per parcel. Turn on multi-polygon parcels in "
                              "Fabric Settings.")
-        return QgsGeometry(polys[0].clone())
-    out = QgsMultiSurface()
-    for p in polys:
-        out.addGeometry(p.clone())
-    return QgsGeometry(out)
+        g = QgsGeometry(polys[0].clone())
+    else:
+        out = QgsMultiSurface()
+        for p in polys:
+            out.addGeometry(p.clone())
+        g = QgsGeometry(out)
+    return match_wkb_type(fabric.parcels.wkbType(), g)
 
 
 def _match(parcel_lyr, face, pos, tol, current):

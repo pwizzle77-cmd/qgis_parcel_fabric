@@ -23,10 +23,19 @@ from qgis.core import (
     QgsProject,
     QgsProviderRegistry,
     QgsRectangle,
+    QgsTransaction,
     QgsUnitTypes,
     QgsVectorLayer,
     QgsWkbTypes,
 )
+
+
+def _result_ok(result):
+    if result is None or isinstance(result, bool):
+        return result is None or result
+    if isinstance(result, tuple):
+        return bool(result[0])
+    return bool(result)
 
 from . import schema as S
 from . import units as U
@@ -844,13 +853,40 @@ class EditSession:
             # undoes back to marks and rollBack on held.
             self.held = list(self._started)
             return False
+        tr = self._db_transaction()
         errors = []
         for lx in self._started:
             if errors:
-                lx.rollBack()           # one layer failed: don't save the rest without it
+                if tr is None:
+                    lx.rollBack()       # one layer failed: don't save the rest without it
             elif not lx.commitChanges():
                 errors.append("%s: %s" % (lx.name(), "; ".join(lx.commitErrors())))
-                lx.rollBack()
+                if tr is None:
+                    lx.rollBack()
+        if tr is not None and (errors or not _result_ok(tr.commit())):
+            try:
+                tr.rollback()
+            except Exception:
+                pass
+            if not errors:
+                errors.append("the database transaction could not be committed")
         if errors:
             raise RuntimeError("Save failed - " + " | ".join(errors))
         return False
+
+    def _db_transaction(self):
+        """One DB transaction across every started layer that shares a transactional
+        backend (mssql, postgres), so a later layer's failed write rolls everything
+        on this edit back - instead of leaving an earlier layer's commit (a parcel
+        retired, say) stranded with nothing to replace it.
+        """
+        started = [lx for lx in self._started if lx.providerType() in ("mssql", "postgres")]
+        if len(started) < 2:
+            return None
+        try:
+            tr = QgsTransaction.create(started)
+            if tr is None or not _result_ok(tr.begin()):
+                return None
+            return tr
+        except Exception:
+            return None

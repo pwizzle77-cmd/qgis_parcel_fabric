@@ -589,7 +589,8 @@ class OfficeTests(_Base):
         X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
         later = self._county_layer([(box(X0 + 100, Y0, X0 + 200, Y0 + 100), "404-002")])  # 001 dropped, 002 new
         res = sync_parcel_layer(self.fab, later, "Tax", None, "PIN", dry_run=True)
-        self.assertEqual(res, {"missing": ["404-001"], "new": ["404-002"], "changed": []})
+        self.assertEqual(res, {"missing": ["404-001"], "new": ["404-002"], "restorable": [],
+                               "blocked": [], "changed": []})
         current = {f["ParcelNumber"] for f in self.fab.parcels.getFeatures(
             QgsFeatureRequest().setFilterExpression(CURRENT))}
         self.assertEqual(current, {"404-001"})   # nothing actually happened
@@ -601,6 +602,41 @@ class OfficeTests(_Base):
         later = self._county_layer([])
         with self.assertRaisesRegex(RuntimeError, "no longer in the source"):
             sync_parcel_layer(self.fab, later, "Tax", None, "PIN")
+
+    def test_sync_restores_a_parcel_erroneously_retired_by_a_failed_edit(self):
+        # Mirrors a parcel left retired by an edit that then failed to build
+        # (the bug 0.10.17 fixed): the source still has the number, unchanged.
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "406-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        victim = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+        with EditSession([self.fab.parcels], "Simulate a failed merge") as ed:
+            ed.change(self.fab.parcels, victim.id(), "RetiredByRecord", rec)
+        later = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "406-001")])   # unchanged
+        preview = sync_parcel_layer(self.fab, later, "Tax", self.rec, "PIN", dry_run=True)
+        self.assertEqual(preview["restorable"], ["406-001"])
+        self.assertEqual(preview["new"], [])
+        res = sync_parcel_layer(self.fab, later, "Tax", self.rec, "PIN")
+        self.assertEqual(res["restored"], 1)
+        self.assertEqual(res["copied"], 0)
+        current = list(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+        self.assertEqual([f["ParcelNumber"] for f in current], ["406-001"])
+        self.assertEqual(current[0].id(), victim.id())   # the very same row, not a new one
+        self.assertIsNone(current[0]["RetiredByUser"])
+
+    def test_sync_blocks_a_retired_number_whose_outline_no_longer_matches(self):
+        first = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 100), "407-001")])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
+        victim = next(self.fab.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+        with EditSession([self.fab.parcels], "Simulate a failed merge") as ed:
+            ed.change(self.fab.parcels, victim.id(), "RetiredByRecord", rec)
+        later = self._county_layer([(box(X0, Y0, X0 + 100, Y0 + 300), "407-001")])   # very different shape
+        res = sync_parcel_layer(self.fab, later, "Tax", self.rec, "PIN")
+        self.assertEqual(res["restored"], 0)
+        self.assertEqual(res["copied"], 0)   # not silently re-imported under a used number either
+        self.assertEqual(len(res["blocked"]), 1)
+        self.assertEqual(res["blocked"][0]["number"], "407-001")
 
     def test_sync_button_in_the_exchange_dialog_runs_end_to_end(self):
         from unittest.mock import Mock, patch

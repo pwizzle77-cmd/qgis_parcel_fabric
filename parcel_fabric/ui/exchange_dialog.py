@@ -497,7 +497,7 @@ class ExchangeDialog(QDialog):
             QMessageBox.critical(self, self.windowTitle(), "Sync preview failed: %s" % e)
             return
         self._end_progress()
-        if not (preview["missing"] or preview["new"] or preview["changed"]):
+        if not any(preview[k] for k in ("missing", "new", "restorable", "blocked", "changed")):
             self._say("Nothing to sync - every parcel number matches.")
             QMessageBox.information(self, self.windowTitle(), "Nothing to sync - every parcel number matches.")
             return
@@ -505,6 +505,12 @@ class ExchangeDialog(QDialog):
                 if preview["missing"] else None,
                 "%d parcel(s) will be imported (new in the source)." % len(preview["new"])
                 if preview["new"] else None,
+                "%d parcel(s) retired earlier will be restored to current (the source still has "
+                "them, unchanged)." % len(preview["restorable"]) if preview["restorable"] else None,
+                "%d parcel(s) are retired with a number the source still has, but can't be fixed "
+                "automatically - review them after: %s." % (
+                    len(preview["blocked"]), ", ".join(b["number"] for b in preview["blocked"]))
+                if preview["blocked"] else None,
                 "%d parcel(s) have a changed outline and will be left alone - review them after."
                 % len(preview["changed"]) if preview["changed"] else None]
         msg = "\n".join(line for line in lines if line) + "\n\nUnder record %s. Continue?" % (
@@ -523,7 +529,12 @@ class ExchangeDialog(QDialog):
         self._end_progress()
         self.manager.refresh()
         self.iface.mapCanvas().refresh()
-        bits = ["Synced: %d retired, %d imported." % (result["retired"], result["copied"])]
+        bits = ["Synced: %d retired, %d imported, %d restored." % (
+            result["retired"], result["copied"], result["restored"])]
+        if result["blocked"]:
+            bits.append("%d retired parcel(s) with a number the source still has need manual "
+                        "review: %s." % (len(result["blocked"]),
+                                         ", ".join(b["number"] for b in result["blocked"])))
         if result["changed"]:
             bits.append("%d existing parcel(s) have a changed outline and were left alone: %s." % (
                 len(result["changed"]), ", ".join(c["number"] for c in result["changed"])))

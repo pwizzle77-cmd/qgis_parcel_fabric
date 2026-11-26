@@ -1177,6 +1177,18 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             "separate": separate, "lines_made": lines_made, "points_made": points_made}
 
 
+def _same_enough(old, new):
+    inter = old.intersection(new)
+    return (not inter.isEmpty()) and inter.area() >= 0.99 * max(old.area(), new.area())
+
+
+_ZERO_IMPORT = {"plat": {"Subdivision": 0, "Block": 0, "Lot": 0, "too_long": 0}, "copied": 0,
+               "skipped": {"empty": 0, "multipart": 0, "too_long": 0, "duplicate": 0, "same": 0},
+               "backup": None, "multipart_note": None, "records": 0, "record_ids": [],
+               "history_linked": 0, "joined": 0, "overlapping": 0, "separate": 0,
+               "lines_made": 0, "points_made": 0}
+
+
 def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None,
                       dry_run=False, **import_kwargs):
     """Bring current ``ptype`` parcels in line with ``source`` by parcel number,
@@ -1186,13 +1198,23 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
     A number no longer in ``source`` is retired under ``record`` (which it needs,
     if anything is retired). A number not yet in the fabric is imported - see
     import_parcel_layer, which every keyword past ``progress`` is passed straight
-    on to. A number in both is left exactly as it is, even if its outline in
-    ``source`` has moved, and reported as changed instead: a real split, merge
-    or resurvey still has to go through the proper tool, not be overwritten
-    silently just because the county's own extract changed.
+    on to, though only the rows that are actually new go through it, not the
+    whole source layer. A number in both current is left exactly as it is, even
+    if its outline in ``source`` has moved, and reported as changed instead: a
+    real split, merge or resurvey still has to go through the proper tool, not
+    be overwritten silently just because the county's own extract changed.
 
-    ``dry_run`` only counts what would happen (``missing``, ``new`` and ``changed``)
-    and changes nothing - for a preview before the real sync.
+    A number that is RETIRED rather than missing from the fabric - most often
+    a parent left retired by an edit that then failed to build, before 0.10.17's
+    transaction fix - and whose retired outline still matches ``source`` is
+    restored to current instead of (hopelessly) re-imported, since its number
+    is already used. One that's retired with a different outline, or with more
+    than one retired row under that number, is reported as ``blocked`` instead:
+    too ambiguous to fix on its own.
+
+    ``dry_run`` only counts what would happen (``missing``, ``new``, ``restorable``,
+    ``blocked`` and ``changed``) and changes nothing - for a preview before the
+    real sync.
     """
     from qgis.core import QgsWkbTypes
     from .numbering import NumberError, fields_for, is_placeholder
@@ -1209,10 +1231,13 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
         xf = QgsCoordinateTransform(source.crs(), fabric.parcels.crs(), QgsProject.instance())
 
     _tell(progress, 0, "Sync: reading the source layer")
-    source_parts = {}
+    source_parts, source_fids = {}, {}
     total = source.featureCount()
     seen = 0
-    for feat in source.getFeatures():
+    src_req = QgsFeatureRequest()
+    if number_field:
+        src_req.setSubsetOfAttributes([number_field], source.fields())
+    for feat in source.getFeatures(src_req):
         seen += 1
         if total and (seen % 200 == 0 or seen == total):
             _tell(progress, min(35.0, 35.0 * seen / float(total)),
@@ -1232,17 +1257,20 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
         if xf is not None:
             g.transform(xf)
         source_parts.setdefault(number, []).append(g)
+        source_fids.setdefault(number, []).append(feat.id())
     source_geom = {n: (g[0] if len(g) == 1 else QgsGeometry.unaryUnion(g)) for n, g in source_parts.items()}
 
-    _tell(progress, 40, "Sync: reading the fabric's current parcels")
+    _tell(progress, 35, "Sync: reading the fabric's current parcels")
     fabric_parts, fabric_fids = {}, {}
     expr = '%s AND %s AND ("IsSeed" IS NULL OR "IsSeed" = 0)' % (type_expr(ptype), CURRENT)
+    num_req = QgsFeatureRequest().setFilterExpression(expr)
+    num_req.setSubsetOfAttributes(["ParcelNumber"], fabric.parcels.fields())
     f_total = fabric.parcels.featureCount()
     f_seen = 0
-    for f in fabric.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(expr)):
+    for f in fabric.parcels.getFeatures(num_req):
         f_seen += 1
         if f_total and (f_seen % 200 == 0 or f_seen == f_total):
-            _tell(progress, min(49.0, 40.0 + 9.0 * f_seen / float(f_total)),
+            _tell(progress, min(45.0, 35.0 + 10.0 * f_seen / float(f_total)),
                   "Sync: reading the fabric's current parcels: %d of %d" % (f_seen, f_total))
         number = f["ParcelNumber"]
         if not number:
@@ -1257,16 +1285,44 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
     missing = sorted(set(fabric_geom) - set(source_geom))
     changed = []
     for number in sorted(set(fabric_geom) & set(source_geom)):
-        old, new = fabric_geom[number], source_geom[number]
-        inter = old.intersection(new)
-        same = (not inter.isEmpty()) and inter.area() >= 0.99 * max(old.area(), new.area())
-        if not same:
-            changed.append({"number": number, "old_area": old.area(), "new_area": new.area()})
+        if not _same_enough(fabric_geom[number], source_geom[number]):
+            changed.append({"number": number, "old_area": fabric_geom[number].area(),
+                            "new_area": source_geom[number].area()})
 
-    new = sorted(set(source_geom) - set(fabric_geom))
+    candidates = sorted(set(source_geom) - set(fabric_geom))
+    restorable, blocked = {}, []
+    if candidates:
+        _tell(progress, 46, "Sync: checking numbers retired earlier")
+        from .parcel_numbers import unfiltered
+        # fabric.parcels normally has a "show only current" subset filter once it's
+        # in the project, which would otherwise hide every retired row from this scan.
+        all_parcels = unfiltered(fabric.parcels)
+        ret_expr = '%s AND "RetiredByRecord" IS NOT NULL AND "ParcelNumber" IN (%s)' % (
+            type_expr(ptype), ", ".join(quote(n) for n in candidates))
+        ret_req = QgsFeatureRequest().setFilterExpression(ret_expr)
+        ret_req.setSubsetOfAttributes(["ParcelNumber"], all_parcels.fields())
+        retired_fids, retired_geom = {}, {}
+        for f in all_parcels.getFeatures(ret_req):
+            g = f.geometry()
+            if g is None or g.isEmpty():
+                continue
+            retired_fids.setdefault(f["ParcelNumber"], []).append(f.id())
+            retired_geom.setdefault(f["ParcelNumber"], []).append(QgsGeometry(g))
+        for number, fids in retired_fids.items():
+            if len(fids) != 1:
+                blocked.append({"number": number, "reason": "%d retired rows share this number" % len(fids)})
+                continue
+            g = retired_geom[number][0]
+            if _same_enough(g, source_geom[number]):
+                restorable[number] = fids[0]
+            else:
+                blocked.append({"number": number, "reason": "retired with a different outline"})
+    new = sorted(set(candidates) - set(restorable) - {b["number"] for b in blocked})
+
     if dry_run:
         _tell(progress, 100, "Sync preview finished")
-        return {"missing": missing, "new": new, "changed": changed}
+        return {"missing": missing, "new": new, "restorable": sorted(restorable), "blocked": blocked,
+                "changed": changed}
 
     retired = 0
     if missing:
@@ -1274,19 +1330,41 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
             raise RuntimeError(
                 "%d parcel(s) are no longer in the source layer and would be retired, which needs "
                 "an active record (New Record..., or pick one in the Records panel)." % len(missing))
-        _tell(progress, 45, "Sync: retiring %d parcel(s) no longer in the source" % len(missing))
+        _tell(progress, 50, "Sync: retiring %d parcel(s) no longer in the source" % len(missing))
         with EditSession([fabric.parcels], "Sync parcels") as ed:
             for number in missing:
                 for fid in fabric_fids[number]:
                     ed.change(fabric.parcels, fid, "RetiredByRecord", record)
                     retired += 1
 
-    def on_import(pct, text=None):
-        _tell(progress, 50 + 0.5 * pct, text)
+    restored = 0
+    if restorable:
+        _tell(progress, 55, "Sync: restoring %d parcel(s) retired earlier" % len(restorable))
+        with EditSession([fabric.parcels], "Sync parcels") as ed:
+            for fid in restorable.values():
+                ed.change(fabric.parcels, fid, "RetiredByRecord", None)
+                ed.change(fabric.parcels, fid, "RetiredByUser", None)
+                restored += 1
 
-    added = import_parcel_layer(fabric, source, ptype, record, number_field, progress=on_import, **import_kwargs)
+    if not new:
+        added = dict(_ZERO_IMPORT)
+    else:
+        new_fids = [fid for n in new for fid in source_fids[n]]
+        new_layer = QgsVectorLayer("%s?crs=%s" % (QgsWkbTypes.displayString(source.wkbType()),
+                                                   source.crs().authid()), "sync_new", "memory")
+        new_layer.dataProvider().addAttributes(source.fields())
+        new_layer.updateFields()
+        new_layer.dataProvider().addFeatures(
+            list(source.getFeatures(QgsFeatureRequest().setFilterFids(new_fids))))
+
+        def on_import(pct, text=None):
+            _tell(progress, 60 + 0.4 * pct, text)
+
+        added = import_parcel_layer(fabric, new_layer, ptype, record, number_field,
+                                    progress=on_import, **import_kwargs)
     _tell(progress, 100, "Sync finished")
-    return dict(added, retired=retired, missing=missing, new=new, changed=changed)
+    return dict(added, retired=retired, restored=restored, missing=missing, new=new,
+               blocked=blocked, changed=changed)
 
 
 def _write_features(layer, batch):

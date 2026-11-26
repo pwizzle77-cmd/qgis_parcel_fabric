@@ -536,7 +536,7 @@ def _parcel_geometry(fabric, polys):
         for p in polys:
             out.addGeometry(p.clone())
         g = QgsGeometry(out)
-    return match_wkb_type(fabric.parcels.wkbType(), g)
+    return match_wkb_type(fabric.parcels, g)
 
 
 def _match(parcel_lyr, face, pos, tol, current):

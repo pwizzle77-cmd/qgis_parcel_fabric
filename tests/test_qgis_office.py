@@ -90,6 +90,35 @@ class NeighborTests(unittest.TestCase):
         self.assertNotIn("Curve", geom.asWkt())
         self.assertGreater(geom.area(), 100 * 100)
 
+    def test_build_straightens_even_when_the_mssql_layer_itself_reports_a_curved_multi_type(self):
+        # SQL Server's geometry column has no fixed subtype, so QGIS's mssql provider can
+        # report the Parcels layer's own wkbType() as MultiSurface - a curved multi type -
+        # even though SQL Server has no WKT label for MultiSurface at all. match_wkb_type
+        # used to trust that reported type and build exactly the WKT SQL Server rejects.
+        from types import SimpleNamespace
+        from qgis.core import (
+            QgsCircularString, QgsCompoundCurve, QgsCurvePolygon, QgsGeometry,
+            QgsLineString, QgsPoint, QgsVectorLayer,
+        )
+        a, b = QgsPoint(X0, Y0), QgsPoint(X0, Y0 + 100)
+        c, d = QgsPoint(X0 + 100, Y0 + 100), QgsPoint(X0 + 100, Y0)
+        ring = QgsCompoundCurve()
+        ring.addCurve(QgsLineString([a, b]))
+        ring.addCurve(QgsCircularString(b, QgsPoint(X0 + 50, Y0 + 140), c))
+        ring.addCurve(QgsLineString([c, d, a]))
+        poly = QgsCurvePolygon()
+        poly.setExteriorRing(ring)
+        reported_type = QgsVectorLayer("MultiSurface?crs=epsg:2238", "parcels", "memory").wkbType()
+        mssql_parcels = SimpleNamespace(wkbType=lambda: reported_type, providerType=lambda: "mssql")
+        fake_fabric = SimpleNamespace(multipart=True, parcels=mssql_parcels)
+        geom = _parcel_geometry(fake_fabric, [poly])
+        self.assertNotIn("MultiSurface", geom.asWkt())
+        self.assertTrue(geom.asWkt().startswith("MultiPolygon"))
+        self.assertGreater(geom.area(), 100 * 100)
+        single = X._pack_parcel(mssql_parcels, [QgsGeometry(poly.clone())])
+        self.assertNotIn("MultiSurface", single.asWkt())
+        self.assertTrue(single.asWkt().startswith("MultiPolygon"))
+
     def test_default_style_hides_dense_layers_until_zoomed_in(self):
         from qgis.core import QgsVectorLayer
         from parcel_fabric.core.fabric import PROP_ROLE

@@ -73,7 +73,7 @@ def _geom_for(target, g, xf):
     a = g.get()
     a.dropZValue()
     a.dropMValue()
-    return match_wkb_type(target.wkbType(), g)
+    return match_wkb_type(target, g)
 
 
 def _tell(progress, pct, text=None):
@@ -329,14 +329,16 @@ def _pack_parcel(target, parts):
 
     A curve stays a curve only when the table can store one. Lots, blocks and
     subdivisions are plain MultiPolygon. SQL Server rejects MultiSurface WKT,
-    so those curves are stored as straight segments.
+    so those curves are stored as straight segments there - even when the
+    mssql layer's own wkb type claims to be a curved multi type, which its
+    generic "geometry" column can report with no way to actually store it.
     """
     from qgis.core import QgsMultiPolygon, QgsMultiSurface, QgsWkbTypes
     want = target.wkbType()
     multi = QgsWkbTypes.isMultiType(want)
     if not multi and len(parts) != 1:
         return None
-    curved = QgsWkbTypes.isCurvedType(want)
+    curved = QgsWkbTypes.isCurvedType(want) and not (multi and target.providerType() == "mssql")
     owned = []
     for part in parts:
         body = part.constGet()

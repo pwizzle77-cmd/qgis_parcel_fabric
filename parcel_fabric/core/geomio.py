@@ -38,25 +38,35 @@ def curve_segments(curve):
     return out
 
 
-def match_wkb_type(want, g):
-    """``g`` reshaped (curved/straight, single/multi) to fit a layer's own wkb type ``want``.
+def match_wkb_type(target, g):
+    """``g`` reshaped (curved/straight, single/multi) to fit ``target``'s own wkb type.
+
+    ``target`` is a layer (or anything with ``.wkbType()``/``.providerType()``), or
+    just a wkb type for callers that have no layer to offer.
 
     MultiPolygon cannot store a curve: convertToMultiType would turn a CurvePolygon
-    into MultiSurface, and SQL Server rejects that WKT outright. ``None`` if a
-    multi-part geometry can't be squeezed into a single-part field.
+    into MultiSurface, and SQL Server rejects that WKT outright - and SQL Server's
+    generic "geometry" column can report its own wkbType as a curved multi type
+    (MultiSurface/MultiCurve) even though it has no WKT label for either, so a
+    multi-part mssql target never keeps curves regardless of what it reports.
+    ``None`` if a multi-part geometry can't be squeezed into a single-part field.
     """
     from qgis.core import QgsWkbTypes
+    want = target.wkbType() if hasattr(target, "wkbType") else target
+    provider = target.providerType() if hasattr(target, "providerType") else None
     g = QgsGeometry(g)
-    if not QgsWkbTypes.isCurvedType(want):
+    multi = QgsWkbTypes.isMultiType(want)
+    curved = QgsWkbTypes.isCurvedType(want) and not (multi and provider == "mssql")
+    if not curved:
         g.convertToStraightSegment()
-    if g.isMultipart() and not QgsWkbTypes.isMultiType(want):
+    if g.isMultipart() and not multi:
         parts = parts_of(g)
         if len(parts) != 1:
             return None
         g = parts[0]
-    if QgsWkbTypes.isCurvedType(want) and not g.constGet().hasCurvedSegments():
+    if curved and not g.constGet().hasCurvedSegments():
         g = QgsGeometry(g.constGet().toCurveType())
-    if QgsWkbTypes.isMultiType(want):
+    if multi:
         g.convertToMultiType()
     return g
 

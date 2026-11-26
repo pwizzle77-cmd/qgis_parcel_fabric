@@ -7,8 +7,8 @@ before import did this on its own."""
 from qgis.core import QgsFeatureRequest
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QMessageBox, QProgressDialog,
-    QRadioButton, QVBoxLayout,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QMessageBox,
+    QProgressBar, QRadioButton, QVBoxLayout,
 )
 
 from ..core.fabric import CURRENT, type_expr
@@ -51,10 +51,38 @@ class MissingLinesDialog(QDialog):
         form.addRow("Parcel type (for \"Every current parcel\")", self.ptype)
         lay.addLayout(form)
 
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setVisible(False)
+        lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        self.bar.setFormat("%v of %m")
+        self.bar.setVisible(False)
+        lay.addWidget(self.bar)
+        self._running = False
+
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Close)
-        bb.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._run)
+        self.apply_btn = bb.button(QDialogButtonBox.StandardButton.Apply)
+        self.apply_btn.clicked.connect(self._run)
         bb.rejected.connect(self.close)
         lay.addWidget(bb)
+
+    def closeEvent(self, event):
+        if self._running:
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _show(self, so_far, total, text):
+        self.bar.setVisible(True)
+        self.status.setVisible(True)
+        self.bar.setRange(0, max(total, 1))
+        self.bar.setValue(min(max(so_far, 0), max(total, 1)))
+        self.bar.setFormat("%v of %m" if total else "")
+        self.status.setText(text)
+        QApplication.processEvents()
 
     def _gids_by_type(self):
         fab = self.manager.active
@@ -77,34 +105,48 @@ class MissingLinesDialog(QDialog):
     def _run(self):
         from ..core.exchange import derive_lines_and_points
         fab = self.manager.active
-        if fab is None:
+        if fab is None or self._running:
             return
-        by_type = self._gids_by_type()
-        total = sum(len(g) for g in by_type.values())
-        if not total:
-            QMessageBox.information(self, self.windowTitle(), "Nothing to do.")
-            return
-        progress = QProgressDialog("Tracing parcel boundaries...", "Cancel", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
+        self._running = True
+        self.apply_btn.setEnabled(False)
         done = 0
         lines_made = points_made = 0
+        total = 0
         try:
+            self._show(0, 0, "Counting parcels...")
+            by_type = self._gids_by_type()
+            total = sum(len(g) for g in by_type.values())
+            if not total:
+                self.bar.setVisible(False)
+                self.status.setText("Nothing to do.")
+                QMessageBox.information(self, self.windowTitle(), "Nothing to do.")
+                return
             for ptype, gids in by_type.items():
                 def tell(done_n, _count, base=done, overall=total):
-                    progress.setValue(int(100 * (base + done_n) / overall))
-                    progress.setLabelText("Creating lines: %d/%d" % (base + done_n, overall))
+                    so_far = base + max(done_n, 0)
+                    left = max(overall - so_far, 0)
+                    if done_n <= 0 and base == 0:
+                        text = "Reading existing lines. %d parcels, %d left" % (overall, overall)
+                    else:
+                        text = "Creating lines: %d of %d, %d left" % (so_far, overall, left)
+                    self._show(so_far, overall, text)
                 try:
                     lm, pm = derive_lines_and_points(fab, ptype, gids, progress=tell)
                 except Exception as e:
+                    self.status.setText("Failed on parcel type %s: %s" % (ptype, e))
                     QMessageBox.critical(self, self.windowTitle(),
                                          "Failed on parcel type %s: %s" % (ptype, e))
                     return
                 lines_made += lm
                 points_made += pm
                 done += len(gids)
+            self._show(total, total, "Done: %d parcels, %d lines, %d points added."
+                       % (total, lines_made, points_made))
         finally:
-            progress.setValue(100)
+            self._running = False
+            self.apply_btn.setEnabled(True)
+        if not total:
+            return
         self.iface.mapCanvas().refresh()
         self.iface.messageBar().pushSuccess(
             "Parcel Fabric", "Create Missing Lines and Points: %d parcel(s), %d line(s), %d point(s) added."

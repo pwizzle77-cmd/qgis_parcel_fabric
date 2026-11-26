@@ -128,6 +128,8 @@ class Fabric:
         layers = {S.ROLE_SETTINGS: st}
         crs = st.crs() if st.crs().isValid() else QgsCoordinateReferenceSystem(settings.get("crs", ""))
         multipart = provider in S.MULTIPART_PROVIDERS
+        if provider == "mssql":
+            S.mssql_parcels_multipolygon(conn, schema, S.table_name(prefix, S.ROLE_PARCELS))
         for role in (S.ROLE_LINEAGE, S.ROLE_LOTS, S.ROLE_BLOCKS, S.ROLE_SUBDIVISIONS):
             S.ensure_table(conn, schema, prefix, role, crs, multipart)
         for role in (S.ROLE_RECORDS, S.ROLE_POINTS, S.ROLE_CONNECTIONS, S.ROLE_PARCELS, S.ROLE_LINES,
@@ -168,6 +170,7 @@ class Fabric:
             for k, v in S.DEFAULT_SETTINGS.items():
                 settings.setdefault(k, v)
             fab = cls(fid, settings, layers)
+            fab._sql_server_multipolygon()
             for role in (S.ROLE_LOTS, S.ROLE_BLOCKS, S.ROLE_SUBDIVISIONS):
                 if layers.get(role) is None:
                     try:
@@ -236,6 +239,56 @@ class Fabric:
     def multipart(self):
         """Can one parcel have several polygons?"""
         return QgsWkbTypes.isMultiType(self.parcels.wkbType())
+
+    def _sql_server_multipolygon(self):
+        """Open an existing SQL Server parcel table as MultiPolygon.
+
+        A project layer keeps the type it was saved with, so changing
+        geometry_columns is not enough until the layer is reopened.
+        """
+        lyr = self.layers.get(S.ROLE_PARCELS)
+        if lyr is None or lyr.providerType() != "mssql" or not lyr.isValid():
+            return
+        if QgsWkbTypes.flatType(lyr.wkbType()) == Qgis.WkbType.MultiPolygon:
+            return
+        if lyr.isEditable():
+            from qgis.core import QgsMessageLog
+            QgsMessageLog.logMessage(
+                "Save parcel edits and reopen the project so several polygons can share one parcel.",
+                "Parcel Fabric", Qgis.MessageLevel.Warning)
+            return
+        reg = QgsProviderRegistry.instance()
+        parts = reg.decodeUri("mssql", lyr.source())
+        schema = parts.get("schema") or "dbo"
+        table = parts.get("table") or S.table_name(self.settings.get("prefix", ""), S.ROLE_PARCELS)
+        try:
+            conn = reg.providerMetadata("mssql").createConnection(lyr.source(), {})
+        except Exception as e:
+            from qgis.core import QgsMessageLog
+            QgsMessageLog.logMessage("Could not open the SQL Server fabric: %s" % e,
+                                     "Parcel Fabric", Qgis.MessageLevel.Warning)
+            return
+        if not S.mssql_parcels_multipolygon(conn, schema, table):
+            return
+        from qgis.core import QgsDataSourceUri
+        uri = QgsDataSourceUri(lyr.source())
+        uri.setWkbType(Qgis.WkbType.MultiPolygon)
+        source, name, subset = lyr.source(), lyr.name(), lyr.subsetString()
+        try:
+            lyr.setDataSource(uri.uri(False), name, "mssql")
+        except Exception as e:
+            from qgis.core import QgsMessageLog
+            QgsMessageLog.logMessage("Could not reopen parcels as MultiPolygon: %s" % e,
+                                     "Parcel Fabric", Qgis.MessageLevel.Warning)
+            return
+        if not lyr.isValid():
+            lyr.setDataSource(source, name, "mssql")
+            from qgis.core import QgsMessageLog
+            QgsMessageLog.logMessage(
+                "Parcels stayed one polygon each. The MultiPolygon reload did not open.",
+                "Parcel Fabric", Qgis.MessageLevel.Warning)
+        if subset:
+            lyr.setSubsetString(subset)
 
     def convert_to_multipart(self):
         """Let parcels have several polygons. Returns the path of the backup."""

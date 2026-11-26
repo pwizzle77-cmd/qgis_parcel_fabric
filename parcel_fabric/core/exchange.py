@@ -14,8 +14,9 @@ from qgis.core import (
     QgsGeometry,
     QgsLineString,
     QgsPoint,
+    QgsFeatureSink,
     QgsProject,
-    QgsRectangle,
+    QgsTransaction,
     QgsVectorLayer,
 )
 
@@ -74,6 +75,10 @@ def _geom_for(target, g, xf):
     a.dropMValue()
     want = target.wkbType()
     from qgis.core import QgsWkbTypes
+    # MultiPolygon cannot store a curve. convertToMultiType would turn a
+    # CurvePolygon into MultiSurface, and SQL Server rejects that WKT.
+    if not QgsWkbTypes.isCurvedType(want):
+        g.convertToStraightSegment()
     if g.isMultipart() and not QgsWkbTypes.isMultiType(want):
         parts = parts_of(g)
         if len(parts) != 1:
@@ -335,10 +340,16 @@ def _surface_parts(geom):
 
 
 def _pack_parcel(target, parts):
-    """The Parcels geometry for these parts. A curve stays a curve."""
-    from qgis.core import QgsMultiSurface, QgsWkbTypes
+    """The geometry for these parts.
+
+    A curve stays a curve only when the table can store one. Lots, blocks and
+    subdivisions are plain MultiPolygon. SQL Server rejects MultiSurface WKT,
+    so those curves are stored as straight segments.
+    """
+    from qgis.core import QgsMultiPolygon, QgsMultiSurface, QgsWkbTypes
     want = target.wkbType()
-    if not QgsWkbTypes.isMultiType(want) and len(parts) != 1:
+    multi = QgsWkbTypes.isMultiType(want)
+    if not multi and len(parts) != 1:
         return None
     curved = QgsWkbTypes.isCurvedType(want)
     owned = []
@@ -346,18 +357,22 @@ def _pack_parcel(target, parts):
         body = part.constGet()
         if body is None:
             continue
-        piece = body.toCurveType() if curved and not body.hasCurvedSegments() else body.clone()
+        if curved:
+            piece = body.toCurveType() if not body.hasCurvedSegments() else body.clone()
+        else:
+            piece = body.segmentize()
         if piece is not None:
             owned.append(piece)
     if not owned:
         return None
-    if not QgsWkbTypes.isMultiType(want):
+    if not multi:
         if len(owned) != 1:
             return None
         return QgsGeometry(owned[0])
-    surface = QgsMultiSurface()
+    surface = QgsMultiSurface() if curved else QgsMultiPolygon()
     for piece in owned:
-        surface.addGeometry(piece)
+        if not surface.addGeometry(piece):
+            return None
     return QgsGeometry(surface)
 
 
@@ -615,38 +630,201 @@ def _stored_user(feat, name):
     return _attr_text(feat, name)
 
 
-def _resolve_point(fabric, xy, record_gid, created_by="", edited_by=""):
-    """An existing or new fabric point at ``xy``, written at once so the
-    next lookup (an adjoining parcel's own corner) sees it. Returns
-    (GlobalID, already existed)."""
-    hit = fabric.find_point(xy[0], xy[1])
-    if hit is not None:
-        return hit["GlobalID"], True
-    pf = fabric.new_point_feature(xy[0], xy[1], record_gid, created_by, edited_by)
-    if not fabric.points.dataProvider().addFeatures([pf])[0]:
-        raise RuntimeError("Could not write a fabric point while deriving lines.")
-    return pf["GlobalID"], False
+def _curve_ends(geom):
+    """Start and end of a line, or None."""
+    if geom is None or geom.isEmpty():
+        return None
+    g = geom.constGet()
+    if g is not None and hasattr(g, "startPoint") and hasattr(g, "endPoint"):
+        s, e = g.startPoint(), g.endPoint()
+        return (s.x(), s.y()), (e.x(), e.y())
+    verts = list(QgsGeometry(g.segmentize()).vertices()) if g is not None else []
+    if len(verts) < 2:
+        return None
+    return (verts[0].x(), verts[0].y()), (verts[-1].x(), verts[-1].y())
 
 
-def _existing_line(fabric, ptype, a, b, tol):
-    """A current ``ptype`` line already running between a and b (either
-    direction), within tol - so a shared boundary is never duplicated."""
-    rect = QgsRectangle(min(a[0], b[0]) - tol, min(a[1], b[1]) - tol,
-                        max(a[0], b[0]) + tol, max(a[1], b[1]) + tol)
-    req = QgsFeatureRequest().setFilterRect(rect).setFilterExpression(
-        "%s AND %s" % (CURRENT, type_expr(ptype)))
+def _result_ok(result):
+    if result is None or isinstance(result, bool):
+        return result is None or result
+    if isinstance(result, tuple):
+        return bool(result[0])
+    return bool(result)
 
-    def close(p, q):
-        return math.hypot(p[0] - q[0], p[1] - q[1]) <= tol
 
-    for f in fabric.lines.getFeatures(req):
-        verts = list(QgsGeometry(f.geometry().constGet().segmentize()).vertices())
-        if len(verts) < 2:
-            continue
-        s, e = (verts[0].x(), verts[0].y()), (verts[-1].x(), verts[-1].y())
-        if (close(s, a) and close(e, b)) or (close(s, b) and close(e, a)):
-            return f
-    return None
+class _NearIndex:
+    """Corners and line ends within the snap tolerance.
+
+    One spatial query per edge becomes a table scan on SQL Server once the
+    line table is large. This reads the tables once, then matches in memory,
+    including corners created earlier in the same import.
+    """
+
+    def __init__(self, tol):
+        self.tol = tol if tol and tol > 0 else 0.0
+        self.cell = self.tol if self.tol > 0 else 1e-7
+        self.points = {}
+        self.lines = {}
+
+    def _bucket(self, x, y):
+        c = self.cell
+        return int(math.floor(x / c)), int(math.floor(y / c))
+
+    def _close(self, p, q):
+        return math.hypot(p[0] - q[0], p[1] - q[1]) <= self.tol
+
+    def add_point(self, x, y, gid):
+        self.points.setdefault(self._bucket(x, y), []).append((x, y, gid))
+
+    def find_point(self, x, y):
+        ix, iy = self._bucket(x, y)
+        best, bd = None, None
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for px, py, gid in self.points.get((ix + dx, iy + dy), ()):
+                    d = math.hypot(px - x, py - y)
+                    if d <= self.tol and (bd is None or d < bd):
+                        best, bd = gid, d
+        return best
+
+    def add_line(self, a, b):
+        rec = (a[0], a[1], b[0], b[1])
+        seen = set()
+        for p in (a, b):
+            key = self._bucket(p[0], p[1])
+            if key in seen:
+                continue
+            seen.add(key)
+            self.lines.setdefault(key, []).append(rec)
+
+    def has_line(self, a, b):
+        ix, iy = self._bucket(a[0], a[1])
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for ax, ay, bx, by in self.lines.get((ix + dx, iy + dy), ()):
+                    start, end = (ax, ay), (bx, by)
+                    if ((self._close(start, a) and self._close(end, b))
+                            or (self._close(start, b) and self._close(end, a))):
+                        return True
+        return False
+
+    def load(self, layer, expr, kind, progress=None, n=0):
+        req = QgsFeatureRequest().setFilterExpression(expr)
+        req.setSubsetOfAttributes(["GlobalID"], layer.fields())
+        seen = 0
+        for f in layer.getFeatures(req):
+            seen += 1
+            if progress is not None and seen % 20000 == 0:
+                progress(0, n)
+            if kind == "point":
+                g = f.geometry()
+                if g is None or g.isEmpty():
+                    continue
+                p = g.asPoint()
+                self.add_point(p.x(), p.y(), f["GlobalID"])
+            else:
+                ends = _curve_ends(f.geometry())
+                if ends:
+                    self.add_line(ends[0], ends[1])
+
+
+class _BulkWriter:
+    """Write points and lines a few thousand at a time.
+
+    SQL Server commits every INSERT on its own unless a transaction is open,
+    and each commit flushes the log. One transaction per batch avoids that.
+    """
+
+    _AT = 2000
+
+    def __init__(self, *layers):
+        self.layers = [lyr for lyr in layers if lyr is not None]
+        self.pending = {id(lyr): [] for lyr in self.layers}
+        self.count = 0
+        self.tr = None
+
+    def add(self, layer, feat):
+        self.pending[id(layer)].append(feat)
+        self.count += 1
+        if self.count >= self._AT:
+            self.flush()
+
+    def finish(self):
+        self.flush()
+
+    def abort(self):
+        self.pending = {id(lyr): [] for lyr in self.layers}
+        self.count = 0
+        tr, self.tr = self.tr, None
+        if tr is not None:
+            try:
+                tr.rollback()
+            except Exception:
+                pass
+
+    def flush(self):
+        batches = []
+        for lyr in self.layers:
+            feats = self.pending[id(lyr)]
+            if feats:
+                batches.append((lyr, feats))
+        if not batches:
+            return
+        self._begin()
+        try:
+            for lyr, feats in batches:
+                self._add(lyr, feats)
+        except Exception:
+            self.abort()
+            raise
+        self._commit()
+        for lyr in self.layers:
+            self.pending[id(lyr)] = []
+        self.count = 0
+
+    def _add(self, layer, feats):
+        prov = layer.dataProvider()
+        if layer.providerType() == "mssql":
+            flag = getattr(getattr(QgsFeatureSink, "Flag", QgsFeatureSink), "FastInsert", None)
+            result = prov.addFeatures(feats, flag) if flag is not None else prov.addFeatures(feats)
+        else:
+            result = prov.addFeatures(feats)
+        if not _result_ok(result):
+            raise RuntimeError("Could not write fabric features while deriving lines.")
+
+    def _begin(self):
+        if self.tr is not None or not self.layers:
+            return
+        prov = self.layers[0].providerType()
+        if prov not in ("mssql", "postgres"):
+            return
+        try:
+            # create(layers) keeps the database connection and drops the table
+            # name, so Points and Parcel_Lines share one transaction.
+            tr = QgsTransaction.create(self.layers)
+            if tr is None:
+                return
+            if not _result_ok(tr.begin()):
+                try:
+                    tr.rollback()
+                except Exception:
+                    pass
+                return
+            self.tr = tr
+        except Exception:
+            self.tr = None
+
+    def _commit(self):
+        tr, self.tr = self.tr, None
+        if tr is None:
+            return
+        done = tr.commit()
+        if not _result_ok(done):
+            try:
+                tr.rollback()
+            except Exception:
+                pass
+            raise RuntimeError("Could not commit fabric lines.")
 
 
 def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
@@ -658,10 +836,7 @@ def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
     shortcut: an imported curved ring (rare - external parcel layers are
     almost always straight-sided already) is written as a straight chord
     between its ends, with no recorded radius or arc; re-digitize that
-    boundary with Traverse if it really is a curve. Points and lines are
-    written one at a time, not batched, so an adjoining parcel processed
-    right after always sees a shared corner already made; a very large
-    import will take longer for it.
+    boundary with Traverse if it really is a curve.
     """
     if not parcel_gids:
         return 0, 0
@@ -670,31 +845,56 @@ def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
     gids = [g for g in parcel_gids if g and not (g in seen or seen.add(g))]
     expr = '"GlobalID" IN (%s)' % ", ".join(quote(g) for g in gids)
     parcels = list(fabric.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(expr)))
-    lines_made = points_made = 0
     n = len(parcels)
-    for i, p in enumerate(parcels):
-        if progress is not None and (i % 25 == 0 or i + 1 == n):
-            progress(i + 1, n)
-        record_gid = p["CreatedByRecord"]
-        created_by, edited_by = _stored_user(p, "CreatedByUser"), _stored_user(p, "EditUser")
-        for ext, holes in polygon_rings(p.geometry()):
-            for ring in [ext] + list(holes):
-                for seg in ring:
-                    a, b = seg[1], seg[-1]
-                    if math.hypot(a[0] - b[0], a[1] - b[1]) <= tol:
-                        continue
-                    pa, had_a = _resolve_point(fabric, a, record_gid, created_by, edited_by)
-                    pb, had_b = _resolve_point(fabric, b, record_gid, created_by, edited_by)
-                    points_made += (0 if had_a else 1) + (0 if had_b else 1)
-                    if pa == pb or _existing_line(fabric, ptype, a, b, tol) is not None:
-                        continue
-                    nf = _new_line(fabric, fabric.lines, [a, b], ptype, record_gid,
-                                   created_by=created_by, edited_by=edited_by)
-                    if not fabric.lines.dataProvider().addFeatures([nf])[0]:
-                        raise RuntimeError("Could not write a fabric line while deriving lines.")
-                    lines_made += 1
-    fabric.points.reload()
-    fabric.lines.reload()
+    if not n:
+        return 0, 0
+    if progress is not None:
+        progress(0, n)
+    index = _NearIndex(tol)
+    index.load(fabric.points, CURRENT, "point", progress, n)
+    index.load(fabric.lines, "%s AND %s" % (CURRENT, type_expr(ptype)), "line", progress, n)
+    lines_made = points_made = 0
+    writer = _BulkWriter(fabric.points, fabric.lines)
+    try:
+        for i, p in enumerate(parcels):
+            if progress is not None and (i % 25 == 0 or i + 1 == n):
+                progress(i + 1, n)
+            record_gid = p["CreatedByRecord"]
+            created_by, edited_by = _stored_user(p, "CreatedByUser"), _stored_user(p, "EditUser")
+            for ext, holes in polygon_rings(p.geometry()):
+                for ring in [ext] + list(holes):
+                    for seg in ring:
+                        a, b = seg[1], seg[-1]
+                        if math.hypot(a[0] - b[0], a[1] - b[1]) <= tol:
+                            continue
+                        pa = index.find_point(a[0], a[1])
+                        if pa is None:
+                            pf = fabric.new_point_feature(a[0], a[1], record_gid, created_by, edited_by)
+                            pa = pf["GlobalID"]
+                            index.add_point(a[0], a[1], pa)
+                            writer.add(fabric.points, pf)
+                            points_made += 1
+                        pb = index.find_point(b[0], b[1])
+                        if pb is None:
+                            pf = fabric.new_point_feature(b[0], b[1], record_gid, created_by, edited_by)
+                            pb = pf["GlobalID"]
+                            index.add_point(b[0], b[1], pb)
+                            writer.add(fabric.points, pf)
+                            points_made += 1
+                        if pa == pb or index.has_line(a, b):
+                            continue
+                        nf = _new_line(fabric, fabric.lines, [a, b], ptype, record_gid,
+                                       created_by=created_by, edited_by=edited_by)
+                        index.add_line(a, b)
+                        writer.add(fabric.lines, nf)
+                        lines_made += 1
+        writer.finish()
+    except Exception:
+        writer.abort()
+        raise
+    finally:
+        fabric.points.reload()
+        fabric.lines.reload()
     return lines_made, points_made
 
 
@@ -722,10 +922,12 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     from each parcel's polygon afterwards (see derive_lines_and_points), shared between
     adjoining parcels rather than duplicated, so Build, Merge and Split have something to
     work with. A strap fills the section
-    fields; any other id is stored as typed. A parcel with several polygons,
-    including true curves, is stored as one multi-surface, also when the layer has
-    one feature per polygon. A number that is all zeros is no number. A GeoPackage that
-    still allows one polygon per parcel is switched (a backup is saved).
+    fields; any other id is stored as typed. A parcel with several polygons is
+    one feature, also when the layer has one feature per polygon. GeoPackage and
+    PostGIS keep true curves. SQL Server stores them as a straight MultiPolygon.
+    A table that still allows only one polygon per parcel keeps each polygon as
+    its own current parcel. A number that is all zeros is no number. A GeoPackage
+    that still allows one polygon per parcel is switched (a backup is saved).
     shortcut: the same outline is imported once; stack a condo with Stacked Unit
     when the layer has more than one number on one polygon.
     """
@@ -781,6 +983,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
 
     mine, joined = {}, {}       # number -> [GlobalID, its polygons]; numbers drawn as several features
     overlapping = 0
+    separate = 0                 # extra polygons stored as their own current rows
 
     def allow_multipart():
         """Switch a one-polygon-per-parcel fabric. False when it can't be switched."""
@@ -870,13 +1073,8 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             body.dropZValue()
             body.dropMValue()
         parts = _surface_parts(prepared)
-        if len(parts) > 1 and not allow_multipart():
-            skipped["multipart"] += 1
-            continue
-        geom = _pack_parcel(target, parts)
-        if not _has_area(geom):
-            skipped["empty" if len(parts) <= 1 else "multipart"] += 1
-            continue
+        # One row per polygon only when this table cannot hold several.
+        groups = [[p] for p in parts] if len(parts) > 1 and not allow_multipart() else [parts]
         text = _attr_text(feat, number_field)
         try:
             vals = fields_for("" if is_placeholder(text) else text)
@@ -887,52 +1085,60 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
         if number and number in used and number not in mine:
             skipped["duplicate"] += 1
             continue
-        if _same_outline(geom, index, held):
-            skipped["same"] += 1
-            continue
-        if number in mine:
-            # another polygon of a parcel already imported
-            flat = QgsGeometry(geom.constGet().segmentize())
-            whole = [QgsGeometry(p.constGet().segmentize()) for p in mine[number][1]]
-            if any(flat.intersection(p).area() > 0.01 * min(flat.area(), p.area()) for p in whole):
-                overlapping += 1        # not one parcel: kept as its own, for Check Fabric to report
-            elif allow_multipart():
-                mine[number][1].extend(parts)
-                joined[number] = mine[number]
-                remember(geom)
+        for group in groups:
+            geom = _pack_parcel(target, group)
+            if not _has_area(geom):
+                skipped["empty" if len(group) <= 1 else "multipart"] += 1
                 continue
-            else:
-                skipped["multipart"] += 1
+            if _same_outline(geom, index, held):
+                skipped["same"] += 1
                 continue
-        when = _as_qdate(feat[date_field]) if date_field and feat.fields().indexOf(date_field) >= 0 else None
-        created_by = _attr_text(feat, created_field)[:100]
-        edited_by = _attr_text(feat, edited_field)[:100]
-        nf = QgsFeature(fields)
-        nf.setGeometry(geom)
-        base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0,
-                "StatedAreaUnit": 1,
-                "CreatedByRecord": take_record(number, when, feat, created_by, edited_by),
-                "Name": text or None, "CalculatedArea": area(geom)}
-        if created_by:
-            base["CreatedByUser"] = created_by
-        if edited_by:
-            base["EditUser"] = edited_by
-        base.update(vals)
-        for key, value in base.items():
-            i = fields.indexOf(key)
-            if i >= 0:
-                nf.setAttribute(i, value)
-        batch.append(nf)
-        all_gids.append(base["GlobalID"])
-        if number:
-            used.add(number)
-            mine.setdefault(number, [base["GlobalID"], list(parts)])
-            stem = split_parts(number, separator, digits)
-            if stem:
-                stems.add(stem[0])
-        remember(geom)
-        if len(batch) >= 1000:
-            flush()
+            if number in mine:
+                # another polygon of a parcel already imported
+                flat = QgsGeometry(geom.constGet().segmentize())
+                whole = [QgsGeometry(p.constGet().segmentize()) for p in mine[number][1]]
+                if any(flat.intersection(p).area() > 0.01 * min(flat.area(), p.area()) for p in whole):
+                    overlapping += 1        # not one parcel: kept as its own, for Check Fabric to report
+                elif allow_multipart():
+                    mine[number][1].extend(group)
+                    joined[number] = mine[number]
+                    remember(geom)
+                    continue
+                else:
+                    separate += 1
+            when = _as_qdate(feat[date_field]) if date_field and feat.fields().indexOf(date_field) >= 0 else None
+            created_by = _attr_text(feat, created_field)[:100]
+            edited_by = _attr_text(feat, edited_field)[:100]
+            nf = QgsFeature(fields)
+            nf.setGeometry(geom)
+            base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0,
+                    "StatedAreaUnit": 1,
+                    "CreatedByRecord": take_record(number, when, feat, created_by, edited_by),
+                    "Name": text or None, "CalculatedArea": area(geom)}
+            if created_by:
+                base["CreatedByUser"] = created_by
+            if edited_by:
+                base["EditUser"] = edited_by
+            base.update(vals)
+            for key, value in base.items():
+                i = fields.indexOf(key)
+                if i >= 0:
+                    nf.setAttribute(i, value)
+            batch.append(nf)
+            all_gids.append(base["GlobalID"])
+            if number:
+                used.add(number)
+                slot = mine.get(number)
+                if slot is None:
+                    mine[number] = [base["GlobalID"], list(group)]
+                else:
+                    slot[1].extend(group)
+                stem = split_parts(number, separator, digits)
+                if stem:
+                    stems.add(stem[0])
+            remember(geom)
+            if len(batch) >= 1000:
+                flush()
     flush()
     target.reload()
     if joined:
@@ -978,7 +1184,7 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     return {"plat": result["plat"], "copied": copied, "skipped": skipped, "backup": backup, "multipart_note": convert_error,
             "records": len(record_ids), "record_ids": record_ids,
             "history_linked": linked, "joined": len(joined), "overlapping": overlapping,
-            "lines_made": lines_made, "points_made": points_made}
+            "separate": separate, "lines_made": lines_made, "points_made": points_made}
 
 
 def _write_features(layer, batch):
@@ -1057,10 +1263,7 @@ def _copy_outlines(target, source, row_for, progress=None, label="features"):
             body.dropMValue()
         parts = _surface_parts(prepared)
         if not QgsWkbTypes.isMultiType(target.wkbType()) and len(parts) > 1:
-            # a table that stores one polygon per row: import each part of a
-            # multi-part shape as its own row with the same attributes, instead
-            # of dropping the whole feature - right for these reference-label
-            # tables (not fabric parcels), unlike a real parcel's own polygons.
+            # One polygon per row. Each part is its own row, with the same attributes.
             part_groups = [[p] for p in parts]
         else:
             part_groups = [parts]

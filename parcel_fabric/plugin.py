@@ -105,6 +105,8 @@ class ParcelFabricPlugin:
                    "Import a parcel layer, an ArcGIS Pro fabric, or LandXML; export a tax-roll shapefile or DXF")
         self._more("fabric", "Create Missing Lines and Points...", lambda: self._window("missing_lines"),
                    "Trace boundary lines and corner points for parcels that don't have them yet")
+        self._more("settings", "Default Style", self.default_style,
+                   "Restyle the fabric layers, and show points, lines, lots and blocks only when zoomed in")
         self._more("settings", "Fabric Settings...", self.fabric_settings,
                    "Parcel types, document folder and naming, parcel numbering, tolerances")
 
@@ -326,6 +328,20 @@ class ParcelFabricPlugin:
         dlg = NumbersDialog(self.iface, self.manager)
         dlg.show()
         self._numbers_dialog = dlg     # keep it alive while open
+
+    def default_style(self):
+        fab = self._need_fabric()
+        if fab is None:
+            return
+        from .core import styles
+        for lyr in fab.all_layers():
+            if lyr is not None:
+                styles.apply(lyr, fab.parcel_types)
+        self.iface.mapCanvas().refresh()
+        self.iface.messageBar().pushSuccess(
+            "Parcel Fabric",
+            "Default style applied. Points from 1:4,000, lines from 1:12,000, "
+            "lots from 1:24,000, blocks from 1:50,000, and closer.")
 
     def fabric_settings(self):
         fab = self._need_fabric()

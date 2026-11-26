@@ -401,10 +401,11 @@ class ExchangeDialog(QDialog):
         self.manager.refresh()
         self.iface.mapCanvas().refresh()
         skipped = result.get("skipped") or {}
-        names = (("duplicate", "duplicate number"), ("same", "same outline"),
-                 ("too_long", "number longer than 30 characters"),
-                 ("multipart", "more than one polygon"), ("empty", "empty"))
-        left = ["%d %s" % (skipped[k], text) for k, text in names if skipped.get(k)]
+        already = ["%d %s" % (skipped[k], text) for k, text in (
+            ("duplicate", "duplicate number"), ("same", "same outline")) if skipped.get(k)]
+        left = ["%d %s" % (skipped[k], text) for k, text in (
+            ("too_long", "number longer than 30 characters"),
+            ("multipart", "more than one polygon"), ("empty", "empty")) if skipped.get(k)]
         bits = ["Imported %d %s." % (result["copied"], label)]
         if result.get("records"):
             bits.append("Filed %d records, one per parcel id." % result["records"])
@@ -412,6 +413,9 @@ class ExchangeDialog(QDialog):
             bits.append("Split history linked %d (inferred from the numbers)." % result["history_linked"])
         if result.get("joined"):
             bits.append("%d parcels have several polygons." % result["joined"])
+        if result.get("separate"):
+            bits.append("%d extra polygons are their own current parcels "
+                        "(this database stores one polygon per parcel)." % result["separate"])
         if result.get("overlapping"):
             bits.append("%d polygons overlap another with the same number; run Check Fabric."
                         % result["overlapping"])
@@ -423,6 +427,8 @@ class ExchangeDialog(QDialog):
             bits.append("%d lists of lots or blocks are longer than the field and were left blank%s."
                         % (plat["too_long"], "" if self.fab.parcels.fields().field("Lot").length() != 16
                            else "; a new fabric has a longer field"))
+        if already:
+            bits.append("Already in the fabric: %s." % ", ".join(already))
         if left:
             bits.append("Left out: %s." % ", ".join(left))
         self._say(" ".join(bits))

@@ -41,6 +41,60 @@ def box(x0, y0, x1, y1):
 
 
 class NeighborTests(unittest.TestCase):
+    def test_a_curved_subdivision_is_stored_as_a_straight_multipolygon(self):
+        # SQL Server rejects MultiSurface WKT. Lots, blocks and subdivisions
+        # are MultiPolygon, so a service curve has to be written as straight segments.
+        from qgis.core import (
+            QgsCircularString, QgsCompoundCurve, QgsCurvePolygon, QgsGeometry,
+            QgsLineString, QgsPoint, QgsVectorLayer, QgsWkbTypes,
+        )
+        a, b = QgsPoint(X0, Y0), QgsPoint(X0, Y0 + 100)
+        c, d = QgsPoint(X0 + 100, Y0 + 100), QgsPoint(X0 + 100, Y0)
+        ring = QgsCompoundCurve()
+        ring.addCurve(QgsLineString([a, b]))
+        ring.addCurve(QgsCircularString(b, QgsPoint(X0 + 50, Y0 + 140), c))
+        ring.addCurve(QgsLineString([c, d, a]))
+        poly = QgsCurvePolygon()
+        poly.setExteriorRing(ring)
+        target = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "subdivisions", "memory")
+        geom = X._pack_parcel(target, [QgsGeometry(poly.clone())])
+        self.assertTrue(geom.asWkt().startswith("MultiPolygon"))
+        self.assertNotIn("Curve", geom.asWkt())
+        self.assertGreater(geom.area(), 100 * 100)
+        curved = QgsVectorLayer("CurvePolygon?crs=epsg:2238", "parcels", "memory")
+        kept = X._pack_parcel(curved, [QgsGeometry(poly.clone())])
+        self.assertTrue(QgsWkbTypes.isCurvedType(kept.wkbType()))
+
+    def test_default_style_hides_dense_layers_until_zoomed_in(self):
+        from qgis.core import QgsVectorLayer
+        from parcel_fabric.core.fabric import PROP_ROLE
+        from parcel_fabric.core import schema as S
+        pts = QgsVectorLayer("Point", "pts", "memory")
+        pts.setCustomProperty(PROP_ROLE, S.ROLE_POINTS)
+        styles.apply(pts)
+        self.assertTrue(pts.hasScaleBasedVisibility())
+        self.assertTrue(pts.isInScaleRange(1000))
+        self.assertFalse(pts.isInScaleRange(100000))
+        lines = QgsVectorLayer("LineString", "lines", "memory")
+        lines.setCustomProperty(PROP_ROLE, S.ROLE_LINES)
+        styles.apply(lines)
+        self.assertTrue(lines.isInScaleRange(5000))
+        self.assertFalse(lines.isInScaleRange(50000))
+        lots = QgsVectorLayer("Polygon", "lots", "memory")
+        lots.setCustomProperty(PROP_ROLE, S.ROLE_LOTS)
+        styles.apply(lots)
+        self.assertTrue(lots.isInScaleRange(10000))
+        self.assertFalse(lots.isInScaleRange(100000))
+        blocks = QgsVectorLayer("Polygon", "blocks", "memory")
+        blocks.setCustomProperty(PROP_ROLE, S.ROLE_BLOCKS)
+        styles.apply(blocks)
+        self.assertTrue(blocks.isInScaleRange(20000))
+        self.assertFalse(blocks.isInScaleRange(100000))
+        parcels = QgsVectorLayer("Polygon", "parcels", "memory")
+        parcels.setCustomProperty(PROP_ROLE, S.ROLE_PARCELS)
+        styles.apply(parcels, ["Tax"])
+        self.assertFalse(parcels.hasScaleBasedVisibility())
+
     def test_overlap_gap_stack_and_road(self):
         a = box(0, 0, 10, 10)
         overlap = neighbor_issues([("a", "Tax", "", a), ("b", "Tax", "", box(5, 0, 15, 10))], 0.01)
@@ -339,6 +393,9 @@ class OfficeTests(_Base):
         self.assertEqual(out["copied"], 2)
         self.assertEqual(out["lines_made"], 7)    # 4 + 4 sides, one shared
         self.assertEqual(out["points_made"], 6)   # 4 + 4 corners, two shared
+        again_l, again_p = X.derive_lines_and_points(
+            self.fab, "Tax", [f["GlobalID"] for f in self.fab.parcels.getFeatures()])
+        self.assertEqual((again_l, again_p), (0, 0))
         by_num = {f["ParcelNumber"]: f for f in self.fab.parcels.getFeatures()}
         parents = [by_num["100-001"], by_num["100-002"]]
         res = E.merge_parcels(self.fab, parents, self.rec)
@@ -348,6 +405,31 @@ class OfficeTests(_Base):
         self.assertAlmostEqual(merged.geometry().area(), 100 * 200 + 80 * 200, places=3)
         self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures(
             QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL'))), 1)
+
+    def test_import_snaps_a_shared_edge_a_hair_apart(self):
+        # The shared side sits 0.009 ft apart, across a snap-grid cell, still inside
+        # the 0.01 tolerance. It is one line and two corners, not a second copy.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+
+        def feat(geom, pin):
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            return f
+
+        lyr.dataProvider().addFeatures([
+            feat(box(X0, Y0, X0 + 100, Y0 + 200), "SNAP-1"),
+            feat(box(X0 + 100 - 0.009, Y0, X0 + 180, Y0 + 200), "SNAP-2"),
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        out = X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN")
+        self.assertEqual(out["copied"], 2)
+        self.assertEqual(out["lines_made"], 7)
+        self.assertEqual(out["points_made"], 6)
 
     def test_import_files_a_record_per_parcel_and_split_history(self):
         from qgis.PyQt.QtCore import QVariant
@@ -639,6 +721,118 @@ class OfficeTests(_Base):
         self.assertEqual([f["Name"] for f in unnumbered], [zero, zero])
         again = X.import_parcel_layer(self.fab, self.county(*rows), "Tax", None, "PIN", "EDITED")
         self.assertEqual(again["copied"], 0)
+
+    def test_sql_server_parcels_store_several_polygons(self):
+        # SQL Server rejects MultiSurface. A new fabric is MultiPolygon, and a
+        # multi-part county parcel is one straight feature.
+        import json
+        from qgis.core import Qgis, QgsFeature, QgsField, QgsVectorLayer, QgsWkbTypes
+        from qgis.PyQt.QtCore import QVariant
+        from parcel_fabric.core import schema as S
+        from parcel_fabric.core.fabric import Fabric
+
+        def parcel_wkb(provider, multipart=True):
+            for role, _name, wkb, _fields in S.table_specs("", multipart, provider):
+                if role == S.ROLE_PARCELS:
+                    return wkb
+
+        self.assertEqual(parcel_wkb("mssql"), Qgis.WkbType.MultiPolygon)
+        self.assertEqual(parcel_wkb("postgres"), Qgis.WkbType.MultiSurface)
+        self.assertEqual(parcel_wkb("ogr", False), Qgis.WkbType.CurvePolygon)
+
+        class Conn:
+            def __init__(self, types, promote=False):
+                self.types = list(types)
+                self.promote = promote
+                self.sql = []
+
+            def executeSql(self, sql):
+                self.sql.append(sql)
+                if sql.startswith("UPDATE") and self.promote:
+                    self.types = ["MULTIPOLYGON"]
+                if sql.startswith("SELECT"):
+                    return [[t] for t in self.types]
+                return []
+
+        conn = Conn(["CURVEPOLYGON"], promote=True)
+        self.assertTrue(S.mssql_parcels_multipolygon(conn, "dbo", "Parcels"))
+        self.assertIn("MULTIPOLYGON", conn.sql[0])
+        self.assertIn("f_table_name = 'Parcels'", conn.sql[0])
+        self.assertFalse(S.mssql_parcels_multipolygon(Conn([]), "dbo", "Parcels"))
+        self.assertFalse(S.mssql_parcels_multipolygon(Conn(["CURVEPOLYGON"]), "dbo", "Parcels"))
+
+        layers = {}
+        for role, name, wkb, fields in S.table_specs("", provider="mssql"):
+            layer = QgsVectorLayer(QgsWkbTypes.displayString(wkb) + "?crs=epsg:2238", name, "memory")
+            self.assertTrue(layer.isValid(), name)
+            layer.dataProvider().addAttributes(S._fields(fields))
+            layer.updateFields()
+            layers[role] = layer
+        settings = dict(S.DEFAULT_SETTINGS, crs="EPSG:2238", parcel_types=json.dumps(["Tax"]),
+                        plss_use_default="0")
+        fab = Fabric(S.new_guid(), settings, layers)
+        self.assertTrue(fab.multipart)
+        lyr = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+        feat = QgsFeature(lyr.fields())
+        feat.setGeometry(QgsGeometry.fromMultiPolygonXY([
+            box(X0, Y0, X0 + 100, Y0 + 100).asPolygon(),
+            box(X0 + 300, Y0, X0 + 400, Y0 + 100).asPolygon()]))
+        feat.setAttribute("PIN", "02-5S-17-09063-000")
+        self.assertTrue(lyr.dataProvider().addFeatures([feat])[0])
+        out = X.import_parcel_layer(fab, lyr, "Tax", None, "PIN", split_history=False)
+        self.assertEqual(out["copied"], 1, out)
+        self.assertEqual((out["separate"], out["joined"], out["skipped"]["multipart"]), (0, 0, 0))
+        saved, = list(fab.parcels.getFeatures())
+        geom = saved.geometry()
+        self.assertTrue(geom.asWkt().startswith("MultiPolygon"), geom.asWkt()[:40])
+        self.assertNotIn("Curve", geom.asWkt())
+        self.assertEqual(geom.constGet().numGeometries(), 2)
+        self.assertEqual(saved["ParcelNumber"], "02-5S-17-09063-000")
+        self.assertAlmostEqual(geom.area(), 20000, places=3)
+
+    def test_a_one_polygon_database_imports_every_part_as_current(self):
+        # A table that really stores one polygon per parcel. A multi-part county
+        # parcel is still current, so each polygon is its own row instead of being left out.
+        import os
+        from unittest.mock import patch
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsFeature, QgsFeatureRequest, QgsField, QgsGeometry, QgsVectorLayer
+        from parcel_fabric.core import schema as S
+        from parcel_fabric.core.fabric import CURRENT, Fabric
+
+        lyr = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+
+        def add(geom, pin):
+            feat = QgsFeature(lyr.fields())
+            feat.setGeometry(geom)
+            feat.setAttribute("PIN", pin)
+            self.assertTrue(lyr.dataProvider().addFeatures([feat])[0])
+
+        add(QgsGeometry.fromMultiPolygonXY([
+            box(X0, Y0, X0 + 100, Y0 + 100).asPolygon(),
+            box(X0 + 300, Y0, X0 + 400, Y0 + 100).asPolygon()]), "02-5S-17-09063-000")
+        add(box(X0, Y0 + 300, X0 + 100, Y0 + 400), "05-4S-17-07600-000")
+        add(box(X0 + 300, Y0 + 300, X0 + 400, Y0 + 400), "05-4S-17-07600-000")
+        path = os.path.join(self.tmp, "onepoly.gpkg")
+        with patch.object(S, "MULTIPART_PROVIDERS", ()):
+            S.create_fabric("ogr", path, "", "", ["Tax"], "EPSG:2238", {"plss_use_default": "0"})
+        single = Fabric.open("ogr", path)
+        self.assertFalse(single.multipart)
+        with patch.object(single.parcels, "source", return_value="one-polygon-table"):
+            out = X.import_parcel_layer(single, lyr, "Tax", None, "PIN")
+        self.assertEqual(out["skipped"], {"empty": 0, "multipart": 0, "too_long": 0, "duplicate": 0, "same": 0})
+        self.assertEqual((out["copied"], out["separate"], out["joined"]), (4, 2, 0), out)
+        self.assertFalse(single.multipart)
+        self.assertIsNone(out["backup"])
+        rows = list(single.parcels.getFeatures(QgsFeatureRequest().setFilterExpression(CURRENT)))
+        self.assertEqual(sorted(f["ParcelNumber"] for f in rows), [
+            "02-5S-17-09063-000", "02-5S-17-09063-000", "05-4S-17-07600-000", "05-4S-17-07600-000"])
+        self.assertTrue(all(not f["RetiredByRecord"] for f in rows))
+        self.assertAlmostEqual(sum(f.geometry().area() for f in rows), 40000, places=3)
 
     def test_import_lots_and_subdivisions(self):
         from qgis.PyQt.QtCore import QVariant

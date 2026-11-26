@@ -284,20 +284,22 @@ def table_name(prefix, role):
     return p + names[role]
 
 
-# SQL Server has no curved multi-polygon type (Oracle is untested), so parcels stay single there
+# GeoPackage and PostGIS store several polygons as a curved MultiSurface.
+# SQL Server uses a straight MultiPolygon (it rejects MultiSurface). Oracle is untested.
 MULTIPART_PROVIDERS = ("ogr", "postgres")
 
 
-def table_specs(prefix, multipart=True):
+def table_specs(prefix, multipart=True, provider=""):
     """Every table of a fabric: (role, name, wkb, fields)."""
     W = Qgis.WkbType
+    parcel = W.MultiPolygon if provider == "mssql" else (
+        W.MultiSurface if multipart else W.CurvePolygon)
     return [
         (ROLE_SETTINGS, table_name(prefix, ROLE_SETTINGS), W.NoGeometry, SETTINGS_FIELDS),
         (ROLE_RECORDS, table_name(prefix, ROLE_RECORDS), W.MultiPolygon, RECORD_FIELDS),
         (ROLE_POINTS, table_name(prefix, ROLE_POINTS), W.Point, POINT_FIELDS),
         (ROLE_CONNECTIONS, table_name(prefix, ROLE_CONNECTIONS), W.CompoundCurve, LINE_FIELDS),
-        (ROLE_PARCELS, table_name(prefix, ROLE_PARCELS),
-         W.MultiSurface if multipart else W.CurvePolygon, PARCEL_FIELDS),
+        (ROLE_PARCELS, table_name(prefix, ROLE_PARCELS), parcel, PARCEL_FIELDS),
         (ROLE_LINES, table_name(prefix, ROLE_LINES), W.CompoundCurve, LINE_FIELDS),
         # Lots, Blocks and Subdivisions are reference labels, not COGO parcels (no
         # curves, no multi-polygon restriction tied to the parcel fabric's own
@@ -509,6 +511,41 @@ def open_connection(provider, name_or_path):
     return conn
 
 
+def mssql_parcels_multipolygon(conn, schema, table):
+    """Record a SQL Server parcel table as MULTIPOLYGON.
+
+    The geometry column itself is untyped. QGIS reads this row when the layer
+    address does not already name a type. Existing curve polygons stay in the
+    column. Returns True when the row says MULTIPOLYGON.
+    """
+    schema = schema or "dbo"
+    if not table or table[:1] == "(":
+        return False
+    where = "f_table_schema = '%s' AND f_table_name = '%s'" % (
+        schema.replace("'", "''"), table.replace("'", "''"))
+    try:
+        conn.executeSql(
+            "UPDATE geometry_columns SET geometry_type = 'MULTIPOLYGON' "
+            "WHERE %s AND UPPER(geometry_type) IN ('CURVEPOLYGON', 'POLYGON')" % where)
+        result = conn.executeSql("SELECT geometry_type FROM geometry_columns WHERE " + where)
+    except Exception as e:
+        from qgis.core import QgsMessageLog
+        QgsMessageLog.logMessage(
+            "Could not set %s.%s to MultiPolygon (needs UPDATE on geometry_columns): %s"
+            % (schema, table, e), "Parcel Fabric", Qgis.MessageLevel.Warning)
+        return False
+    rows = result.rows() if hasattr(result, "rows") else (result or [])
+    types = [str(r[0]).strip().upper() for r in rows if r]
+    if "MULTIPOLYGON" in types:
+        return True
+    from qgis.core import QgsMessageLog
+    QgsMessageLog.logMessage(
+        "Parcels in %s.%s stayed %s, so several polygons cannot share one parcel."
+        % (schema, table, ", ".join(types) or "unlisted"),
+        "Parcel Fabric", Qgis.MessageLevel.Warning)
+    return False
+
+
 def _ensure_mssql_geometry_columns(conn):
     """QGIS finds spatial tables on SQL Server by querying an OGC-style
     ``geometry_columns`` table first, falling back to scanning
@@ -562,7 +599,7 @@ def create_fabric(provider, name_or_path, schema, prefix, parcel_types, crs_auth
     crs = QgsCoordinateReferenceSystem(crs_authid)
     if not crs.isValid():
         raise RuntimeError("Unknown coordinate system %s" % crs_authid)
-    specs = table_specs(prefix, provider in MULTIPART_PROVIDERS)
+    specs = table_specs(prefix, provider in MULTIPART_PROVIDERS, provider)
     for _role, name, _w, _f in specs:
         if conn.tableExists(schema, name):
             raise RuntimeError("Table %s already exists - pick another prefix" % name)

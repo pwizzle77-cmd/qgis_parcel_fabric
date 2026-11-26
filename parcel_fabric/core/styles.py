@@ -20,9 +20,23 @@ from .geomio import unit_word
 
 PARCEL_COLORS = ["#1f5fa8", "#b5541b", "#2f7d32", "#7b3fa0", "#8a6d00"]
 
+# Most zoomed-out scale at which the layer still draws. A county view is
+# past 1:100,000; these stay off until the features are large enough to read.
+VIEW_SCALE = {S.ROLE_POINTS: 4000, S.ROLE_LINES: 12000, S.ROLE_LOTS: 24000, S.ROLE_BLOCKS: 50000}
+
+
+def _view_scale(lyr, role):
+    limit = VIEW_SCALE.get(role)
+    if not limit:
+        return
+    lyr.setScaleBasedVisibility(True)
+    lyr.setMinimumScale(limit)
+    lyr.setMaximumScale(0)
+
 
 def apply(lyr, parcel_types=()):
     role = lyr.customProperty(PROP_ROLE)
+    _view_scale(lyr, role)
     if role == S.ROLE_POINTS:
         sym = QgsMarkerSymbol.createSimple({"name": "circle", "size": "1.6",
                                             "color": "255,255,255", "outline_color": "40,40,40",

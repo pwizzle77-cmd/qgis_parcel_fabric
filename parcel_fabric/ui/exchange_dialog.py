@@ -20,6 +20,7 @@ from ..core.numbering import NumberError, clean_pattern, number_pattern
 
 _NUMBER_FIELDS = ("PARCELNO", "PARCEL_NO", "PARCELNUM", "PARCEL_NUM", "PARCELID", "PARCEL_ID",
                   "PIN", "STRAP", "FOLIO", "PARCEL", "ParcelNumber", "NAME")
+_ID_FIELDS = ("PARCELID", "PARCEL_ID", "PID")
 _DATE_FIELDS = ("DEEDDATE", "DEED_DATE", "RECORDDATE", "RECORDED", "RECORD_DATE", "SALEDATE",
                 "SALE_DATE", "DOCDATE", "DOC_DATE", "DATE")
 _LOT_FIELDS = ("LOT", "LOT_NO", "LOTNO", "LOT_NUM", "LOTNUM")
@@ -34,8 +35,9 @@ _EDITED_FIELDS = ("LAST_EDITED_USER", "LASTEDITOR", "EDITED_BY", "EDITUSER", "ED
                   "UPDATED_BY", "UPDATE_USER", "MODIFIED_BY", "last_edited_user", "EditUser")
 
 _LAYER_INFO = {
-    "Parcels": "Each parcel id becomes its own record. The record name and parcel id are that "
-               "number. Book, page, created-by, and last-edited-by can come from fields on the layer. "
+    "Parcels": "Each parcel number becomes its own record. The record name is that number. "
+               "A parcel id field, when it has a value, is stored on the parcel. "
+               "Book, page, created-by, and last-edited-by can come from fields on the layer. "
                "Map a date field onto the recorded date. "
                "Split history uses the parcel number below: separator, how many trailing digits "
                "count as the split, and the parent suffix. Every parcel comes in current; nothing is "
@@ -166,6 +168,7 @@ class ExchangeDialog(QDialog):
         form.addRow("Import into", self.target)
         lay.addLayout(form)
         self.num_field = _field_box()
+        self.pid_field = _field_box()
         self.date_field = _field_box()
         self.book_field = _field_box()
         self.page_field = _field_box()
@@ -179,7 +182,8 @@ class ExchangeDialog(QDialog):
         self.block_field = _field_box()
         self.block_sub_field = _field_box()
         self._field_boxes = (
-            (self.num_field, _NUMBER_FIELDS), (self.date_field, _DATE_FIELDS),
+            (self.num_field, _NUMBER_FIELDS), (self.pid_field, _ID_FIELDS),
+            (self.date_field, _DATE_FIELDS),
             (self.book_field, _BOOK_FIELDS), (self.page_field, _PAGE_FIELDS),
             (self.created_field, _CREATED_FIELDS), (self.edited_field, _EDITED_FIELDS),
             (self.lot_field, _LOT_FIELDS), (self.lot_sub_field, _SUB_FIELDS),
@@ -259,7 +263,11 @@ class ExchangeDialog(QDialog):
         pattern.addWidget(QLabel("Parent"))
         pattern.addWidget(self.num_parent)
         pattern.addStretch(1)
+        self.pid_field.setToolTip("Parcel id without section-township-range, such as 00213-001. "
+                                  "The parcel number field still fills section, township, and range. "
+                                  "A value longer than 12 characters is left unused.")
         f.addRow("Parcel number field", self.num_field)
+        f.addRow("Parcel ID field", self.pid_field)
         f.addRow("Date field", self.date_field)
         f.addRow("Parcel type", self.layer_type)
         f.addRow("Book", book_row)
@@ -388,7 +396,8 @@ class ExchangeDialog(QDialog):
                     book_field=None if use_active else (self.book_field.currentField() or None),
                     page_field=None if use_active else (self.page_field.currentField() or None),
                     created_field=self.created_field.currentField() or None,
-                    edited_field=self.edited_field.currentField() or None)
+                    edited_field=self.edited_field.currentField() or None,
+                    parcel_id_field=self.pid_field.currentField() or None)
                 label = "parcels"
         except Exception as e:
             self._end_progress()

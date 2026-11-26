@@ -299,6 +299,7 @@ class OfficeTests(_Base):
         strap = by_num["12-4S-16-02942-000"]
         self.assertEqual(strap["Section"], 12)
         self.assertEqual(strap["Township"], "4S")
+        self.assertEqual(strap["ParcelID"], "02942-000")
         blanks = [f for f in self.fab.parcels.getFeatures() if not f["ParcelNumber"]]
         self.assertEqual(len(blanks), 1)
         again = X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN")
@@ -405,6 +406,45 @@ class OfficeTests(_Base):
         self.assertAlmostEqual(merged.geometry().area(), 100 * 200 + 80 * 200, places=3)
         self.assertEqual(sum(1 for _ in self.fab.parcels.getFeatures(
             QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL'))), 1)
+
+    def test_a_parcel_inside_another_can_be_merged(self):
+        # The inner parcel has its own boundary, and one side lies on the outer
+        # line without a shared corner. Merge keeps the outer outline.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([
+            QgsField("PIN", QVariant.String), QgsField("PARCELID", QVariant.String)])
+        lyr.updateFields()
+
+        def feat(geom, pin, pid):
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            f.setAttribute("PARCELID", pid)
+            return f
+
+        lyr.dataProvider().addFeatures([
+            feat(box(X0, Y0, X0 + 200, Y0 + 200), "25-3S-15-00213-000", "213-0"),
+            feat(box(X0, Y0 + 40, X0 + 90, Y0 + 90), "25-3S-15-00213-001", "25-3S-15-00213-001"),
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        out = X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN", parcel_id_field="PARCELID")
+        self.assertEqual(out["copied"], 2, out)
+        by_num = {f["ParcelNumber"]: f for f in self.fab.parcels.getFeatures()}
+        self.assertEqual(by_num["25-3S-15-00213-000"]["ParcelID"], "213-0")
+        self.assertEqual(by_num["25-3S-15-00213-000"]["Section"], 25)
+        # A full strap does not fit the 12-character ParcelID, so the strap piece is kept.
+        self.assertEqual(by_num["25-3S-15-00213-001"]["ParcelID"], "00213-001")
+        parents = [by_num["25-3S-15-00213-000"], by_num["25-3S-15-00213-001"]]
+        res = E.merge_parcels(self.fab, parents, self.rec, keep_number="25-3S-15-00213-001")
+        merged = next(self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL')))
+        self.assertEqual(merged["ParcelNumber"], "25-3S-15-00213-001")
+        self.assertAlmostEqual(merged.geometry().area(), 200 * 200, places=0)
+        self.assertEqual(len(res.children), 1)
+        self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures(
+            QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL'))), 4)
 
     def test_import_snaps_a_shared_edge_a_hair_apart(self):
         # The shared side sits 0.009 ft apart, across a snap-grid cell, still inside

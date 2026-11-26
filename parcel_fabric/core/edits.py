@@ -601,12 +601,35 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
     from . import parcel_numbers as PN
     # one edit: if the merged parcel can't be built, the parents and inner lines come back
     with EditSession([fabric.parcels, lines, fabric.points, fabric.records, fabric.lineage], "Merge") as ed:
+        covered = []
         for f in list(lines.getFeatures(req)):
+            if f["RetiredByRecord"]:
+                continue
             seg = _seg(f.geometry())
+            if seg.isEmpty() or seg.length() <= 0:
+                continue
             mid = seg.interpolate(seg.length() / 2)
             if union.contains(mid) and boundary.distance(mid) > tol:
                 ed.change(lines, f.id(), "RetiredByRecord", record)
                 res.lines_retired += 1
+            else:
+                covered.append((f.id(), seg))
+        # The inner parcel's own boundary can lie along the outer line without sharing
+        # a corner. Build cannot close that loop, so drop a line the others already cover.
+        band = boundary.buffer(tol, 2)
+        again = True
+        while again:
+            again = False
+            for i, (fid, seg) in enumerate(covered):
+                if not band.contains(seg):
+                    continue
+                others = [s for j, (_fid, s) in enumerate(covered) if j != i]
+                if others and QgsGeometry.unaryUnion(others).buffer(tol, 2).contains(seg):
+                    ed.change(lines, fid, "RetiredByRecord", record)
+                    res.lines_retired += 1
+                    del covered[i]
+                    again = True
+                    break
         for p in parents:
             ed.change(fabric.parcels, p.id(), "RetiredByRecord", record)
             res.parents_retired += 1

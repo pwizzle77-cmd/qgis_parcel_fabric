@@ -207,6 +207,8 @@ def build_parcels(fabric: Fabric, ptype, record_gid=None, extent: QgsRectangle =
             candidates[f.id()] = f
     lines = {}
     for f in candidates.values():
+        if f["RetiredByRecord"]:      # retired earlier in this edit; the filter still returns it
+            continue
         if within is not None and not within.intersects(QgsGeometry(f.geometry().constGet().segmentize())):
             continue
         curve = _single_curve(f.geometry())

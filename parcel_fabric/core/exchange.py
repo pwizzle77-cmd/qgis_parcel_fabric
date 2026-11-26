@@ -901,7 +901,7 @@ def derive_lines_and_points(fabric, ptype, parcel_gids, progress=None):
 def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, date_field=None,
                         split_history=True, parent_suffix=0, separator=None, digits=None,
                         book="", page="", progress=None, book_field=None, page_field=None,
-                        created_field=None, edited_field=None):
+                        created_field=None, edited_field=None, parcel_id_field=None):
     """Copy polygons from ``source`` in as current parcels.
 
     With no ``record``, each parcel id is filed as its own record (name and
@@ -922,7 +922,9 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
     from each parcel's polygon afterwards (see derive_lines_and_points), shared between
     adjoining parcels rather than duplicated, so Build, Merge and Split have something to
     work with. A strap fills the section
-    fields; any other id is stored as typed. A parcel with several polygons is
+    fields; any other id is stored as typed. ``parcel_id_field``, when its value
+    fits in 12 characters, is stored as ParcelID instead of the id taken from the
+    number. A parcel with several polygons is
     one feature, also when the layer has one feature per polygon. GeoPackage and
     PostGIS keep true curves. SQL Server stores them as a straight MultiPolygon.
     A table that still allows only one polygon per parcel keeps each polygon as
@@ -1120,6 +1122,9 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
             if edited_by:
                 base["EditUser"] = edited_by
             base.update(vals)
+            pid = _attr_text(feat, parcel_id_field)
+            if pid and len(pid) <= 12:
+                base["ParcelID"] = pid
             for key, value in base.items():
                 i = fields.indexOf(key)
                 if i >= 0:

@@ -21,6 +21,7 @@ from ..core import edits as E
 from ..core import units as U
 from .issues_dialog import IssuesDialog
 from .map_tools import DrawLineTool, PickLineTool
+from .record_dialog import RecordDialog
 
 
 def records_of(fabric, features):
@@ -62,6 +63,29 @@ def pick_record_from_selection(widget, manager, features):
         manager.set_active_record(chosen.data())
 
 
+def new_record_for(widget, manager):
+    """File a new record (book/page, a scan or link) and make it active -
+    so an edit like Merge or Split has its own instrument, not a parent's old one."""
+    fab = manager.active
+    if fab is None:
+        return
+    dlg = RecordDialog(fab, parent=widget)
+    dlg.activate.setChecked(True)      # the whole point here is to use it for this edit
+    if not dlg.exec():
+        return
+    v = dlg.values()
+    try:
+        gid = fab.create_record(**v)
+        if dlg.doc_src:
+            path, doc_hash = dlg.store_document(gid)
+            fab.update_record(gid, doc_url=path, doc_hash=doc_hash)
+    except Exception as e:
+        QMessageBox.critical(widget, "New Record", str(e))
+        return
+    if dlg.activate.isChecked():
+        manager.set_active_record(gid)
+
+
 class _EditWindow(QDialog):
     TITLE = ""
     HELP = ""
@@ -92,6 +116,11 @@ class _EditWindow(QDialog):
         self.use_rec_btn.clicked.connect(
             lambda: pick_record_from_selection(self, self.manager, self.selected()))
         rec_row.addWidget(self.use_rec_btn)
+        self.new_rec_btn = QPushButton("New Record...")
+        self.new_rec_btn.setToolTip("File the plat, deed or agreement behind this edit (book, page, "
+                                    "and a scan or link), and make it the active record.")
+        self.new_rec_btn.clicked.connect(self._new_record)
+        rec_row.addWidget(self.new_rec_btn)
         self.lay.addLayout(rec_row)
         self._watched = []
         fab = manager.active
@@ -133,6 +162,9 @@ class _EditWindow(QDialog):
 
     def on_selection(self):
         pass
+
+    def _new_record(self):
+        new_record_for(self, self.manager)
 
     def _rec_changed(self, *_):
         rec = self.manager.active_record()

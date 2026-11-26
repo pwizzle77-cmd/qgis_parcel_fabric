@@ -9,7 +9,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..core import edits as E
 from ..core import numbering as N
-from .edit_dialogs import pick_record_from_selection, records_of
+from .edit_dialogs import new_record_for, pick_record_from_selection, records_of
 
 
 class StackDialog(QDialog):
@@ -38,6 +38,11 @@ class StackDialog(QDialog):
                                                list(self.manager.active.parcels.getSelectedFeatures())
                                                if self.manager.active else []))
         rec_row.addWidget(self.use_rec_btn)
+        self.new_rec_btn = QPushButton("New Record...")
+        self.new_rec_btn.setToolTip("File the plat, deed or agreement behind this edit (book, page, "
+                                    "and a scan or link), and make it the active record.")
+        self.new_rec_btn.clicked.connect(lambda: new_record_for(self, self.manager))
+        rec_row.addWidget(self.new_rec_btn)
         lay.addLayout(rec_row)
         fab = manager.active
         if fab is not None:

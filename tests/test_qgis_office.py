@@ -119,6 +119,21 @@ class NeighborTests(unittest.TestCase):
         self.assertNotIn("MultiSurface", single.asWkt())
         self.assertTrue(single.asWkt().startswith("MultiPolygon"))
 
+    def test_db_transaction_wraps_even_a_single_mssql_layer(self):
+        # commitChanges() on one layer still sends attribute changes and added
+        # features as separate statements, so a single started mssql layer needs
+        # the transaction wrap too - not just two or more - or a feature-add
+        # failure can leave that same layer's own attribute changes already saved.
+        from unittest.mock import Mock, patch
+        ed = EditSession.__new__(EditSession)
+        ed._started = [Mock(providerType=Mock(return_value="mssql"))]
+        with patch("parcel_fabric.core.fabric.QgsTransaction") as MockTransaction:
+            MockTransaction.create.return_value.begin.return_value = True
+            with patch("parcel_fabric.core.fabric._result_ok", return_value=True):
+                tr = ed._db_transaction()
+        self.assertIsNotNone(tr)
+        MockTransaction.create.assert_called_once_with(ed._started)
+
     def test_default_style_hides_dense_layers_until_zoomed_in(self):
         from qgis.core import QgsVectorLayer
         from parcel_fabric.core.fabric import PROP_ROLE

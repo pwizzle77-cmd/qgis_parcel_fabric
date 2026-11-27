@@ -879,9 +879,14 @@ class EditSession:
         backend (mssql, postgres), so a later layer's failed write rolls everything
         on this edit back - instead of leaving an earlier layer's commit (a parcel
         retired, say) stranded with nothing to replace it.
+
+        Wraps even a single such layer: commitChanges() on one layer still sends
+        attribute changes and added features as separate statements, so without a
+        transaction a feature-add failure can leave that same layer's own attribute
+        changes (a parcel marked retired, say) already saved with nothing to replace it.
         """
         started = [lx for lx in self._started if lx.providerType() in ("mssql", "postgres")]
-        if len(started) < 2:
+        if not started:
             return None
         try:
             tr = QgsTransaction.create(started)

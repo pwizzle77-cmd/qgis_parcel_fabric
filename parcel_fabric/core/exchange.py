@@ -1180,8 +1180,18 @@ def import_parcel_layer(fabric, source, ptype, record=None, number_field=None, d
 
 
 def _same_enough(old, new):
+    """True when ``old`` and ``new`` are close enough to call the same outline (99% area
+    overlap). Checked cheaply first: an exact match (the common case for an unchanged
+    parcel in Sync) skips the GEOS intersection entirely, and areas too different to
+    ever reach 99% overlap (intersection area can't exceed the smaller one) skip it too.
+    """
+    if old.isExactlyEqual(new):
+        return True
+    a_old, a_new = old.area(), new.area()
+    if min(a_old, a_new) < 0.99 * max(a_old, a_new):
+        return False
     inter = old.intersection(new)
-    return (not inter.isEmpty()) and inter.area() >= 0.99 * max(old.area(), new.area())
+    return (not inter.isEmpty()) and inter.area() >= 0.99 * max(a_old, a_new)
 
 
 _ZERO_IMPORT = {"plat": {"Subdivision": 0, "Block": 0, "Lot": 0, "too_long": 0}, "copied": 0,

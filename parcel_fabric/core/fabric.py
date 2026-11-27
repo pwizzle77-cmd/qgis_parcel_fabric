@@ -872,6 +872,9 @@ class EditSession:
                 errors.append("the database transaction could not be committed")
         if errors:
             raise RuntimeError("Save failed - " + " | ".join(errors))
+        from .parcel_numbers import drop_unfiltered
+        for lx in self._started:
+            drop_unfiltered(lx)
         return False
 
     def _db_transaction(self):

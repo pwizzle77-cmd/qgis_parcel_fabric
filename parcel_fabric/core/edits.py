@@ -29,9 +29,9 @@ from . import geomops as G
 from . import lineage as L
 from . import schema as S
 from . import units as U
-from .build import _dates, _single_curve, build_parcels, update_record_footprint
+from .build import _dates, _ends, _on, _single_curve, build_parcels, update_record_footprint
 from .fabric import CURRENT, EditSession, quote, type_expr
-from .geomio import parts_of
+from .geomio import match_wkb_type, parts_of
 
 
 class EditError(RuntimeError):
@@ -255,10 +255,50 @@ def _new_line(fabric, lyr, pts, ptype, record, dim_source="Computed", created_by
 # --------------------------------------------------------------------------
 # Cutting a parcel (Split and Divide)
 # --------------------------------------------------------------------------
+def _interior_cut_runs(pts, ring, tol):
+    """Parts of a cut that are not already on the parcel boundary.
+
+    A historic line of a merged parcel includes the side it shares with the
+    outline. Adding that side again crosses the outline with no shared corner.
+    """
+    if len(pts) < 2:
+        return []
+    on = []
+    for a, b in zip(pts, pts[1:]):
+        mid = QgsGeometry.fromPointXY(QgsPointXY((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0))
+        on.append(ring.distance(mid) <= tol)
+    runs, cur = [], None
+    for i, flag in enumerate(on):
+        a, b = pts[i], pts[i + 1]
+        if flag:
+            if cur is not None:
+                runs.append(cur)
+                cur = None
+            continue
+        cur = [a, b] if cur is None else cur + [b]
+    if cur is not None:
+        runs.append(cur)
+    # A closed trace can start on an inside corner, which splits one run in two.
+    closed = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1]) <= tol
+    if closed and len(runs) >= 2 and not on[0] and not on[-1]:
+        tail, head = runs[-1], runs[0]
+        if math.hypot(tail[-1][0] - head[0][0], tail[-1][1] - head[0][1]) <= tol:
+            runs[0] = tail + head[1:]
+            runs.pop()
+    kept = []
+    for run in runs:
+        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(run, run[1:]))
+        if length > tol:
+            kept.append(run)
+    return kept
+
+
 def clip_cuts(fabric, parcel_geom, cut_geoms):
     """The parts of the cut lines inside a parcel, ends snapped to points.
 
-    Returns a list of point lists (one per straight course).
+    Returns a list of point lists (one per straight course). A stretch that
+    already lies on the boundary is left out; the boundary is split where the
+    cut leaves it.
     """
     tol = fabric.tolerance
     seg = _seg(parcel_geom)
@@ -268,21 +308,25 @@ def clip_cuts(fabric, parcel_geom, cut_geoms):
         inside = g.intersection(seg)
         if inside.isNull() or inside.isEmpty():
             continue
-        for part in inside.asGeometryCollection():
+        parts = inside.asGeometryCollection()
+        if not parts:
+            parts = [inside]
+        for part in parts:
             if part.length() <= tol:
                 continue
             line = part.asPolyline()
             if not line:
                 continue
             pts = [(p.x(), p.y()) for p in line]
-            for i in (0, -1):
-                q = QgsGeometry.fromPointXY(QgsPointXY(*pts[i]))
-                if ring.distance(q) > tol:
-                    raise EditError("The cut line must cross the parcel from edge to edge.")
-                hit = fabric.find_point(pts[i][0], pts[i][1])
-                if hit is not None:
-                    pts[i] = _xy(hit.geometry().asPoint())
-            out.append(pts)
+            for run in _interior_cut_runs(pts, ring, tol):
+                for i in (0, -1):
+                    q = QgsGeometry.fromPointXY(QgsPointXY(*run[i]))
+                    if ring.distance(q) > tol:
+                        raise EditError("The cut line must cross the parcel from edge to edge.")
+                    hit = fabric.find_point(run[i][0], run[i][1])
+                    if hit is not None:
+                        run[i] = _xy(hit.geometry().asPoint())
+                out.append(run)
     if not out:
         raise EditError("The cut line doesn't cross the selected parcel.")
     return out
@@ -584,41 +628,64 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
         raise EditError("A selected parcel is already retired (another editor may have just retired it).")
     ptype = types.pop()
     tol = fabric.tolerance
+    segs = [_seg(p.geometry()) for p in parents]
     bad = [p["ParcelNumber"] or p["Name"] or "#%d" % p.id()
-          for p in parents if not _seg(p.geometry()).isGeosValid()]
+          for p, s in zip(parents, segs) if not s.isGeosValid()]
     if bad:
         raise EditError("%s has an invalid shape (self-intersecting or similar) - run Check Fabric, "
                         "or fix it before merging." % ", ".join(bad))
-    union = QgsGeometry.unaryUnion([_seg(p.geometry()).buffer(tol / 2, 2) for p in parents]).buffer(-tol / 2, 2)
-    raw_polys = union.asGeometryCollection() if union.isMultipart() else [union]
-    # The dilate-erode round trip can leave a near-zero-area sliver where two parcels
-    # touch at a reflex corner (a notch cut from one side, say) - not a real extra piece.
+    # The stored shape is the parents' own outline. A buffer round trip is only
+    # for a hairline gap: it is coarse and eats corners, so it is not the normal path.
+    union = QgsGeometry.unaryUnion(segs)
     noise = (tol * tol) / 100
-    polys = [p for p in raw_polys if p.area() > noise] or raw_polys
-    gap = 0.0
+
+    def pieces(g):
+        raw = g.asGeometryCollection() if g.isMultipart() else [g]
+        kept = [p for p in raw if p.area() > noise]
+        return kept or raw
+
+    polys = pieces(union)
+    if len(polys) == 1:
+        union = polys[0]
     if len(polys) > 1:
         gap = min(polys[i].distance(polys[j])
                  for i in range(len(polys)) for j in range(i + 1, len(polys)))
-    if gap > tol:
-        if not apart:
-            raise EditError(
-                "The selected parcels don't all touch (the closest two are %.3f map units apart - "
-                "the tolerance is %.3f). If they should be contiguous, close that gap first (Align "
-                "Edge, or Check Fabric to see exactly where). Tick \"Join parcels that don't touch\" "
-                "instead to make one multi-polygon parcel out of genuinely separate pieces."
-                % (gap, tol))
-        if not fabric.multipart:
-            raise EditError("This fabric stores one polygon per parcel. Turn on multi-polygon parcels in "
-                            "Fabric Settings first.")
+        if gap > tol:
+            if not apart:
+                raise EditError(
+                    "The selected parcels don't all touch (the closest two are %.3f map units apart - "
+                    "the tolerance is %.3f). If they should be contiguous, close that gap first (Align "
+                    "Edge, or Check Fabric to see exactly where). Tick \"Join parcels that don't touch\" "
+                    "instead to make one multi-polygon parcel out of genuinely separate pieces."
+                    % (gap, tol))
+            if not fabric.multipart:
+                raise EditError("This fabric stores one polygon per parcel. Turn on multi-polygon parcels in "
+                                "Fabric Settings first.")
+        elif not apart:
+            closed = QgsGeometry.unaryUnion([p.buffer(tol / 2, 2) for p in polys]).buffer(-tol / 2, 2)
+            closed_parts = pieces(closed) if not closed.isEmpty() else []
+            if len(closed_parts) != 1:
+                raise EditError("Nothing was saved, because the merged parcel couldn't be built.")
+            union, polys = closed, closed_parts
+    if union.isEmpty():
+        raise EditError("Nothing was saved, because the merged parcel couldn't be built.")
+    geom = match_wkb_type(fabric.parcels, union)
+    if geom is None or geom.isEmpty():
+        raise EditError("Nothing was saved, because the merged parcel couldn't be built.")
     boundary = QgsGeometry(union.constGet().boundary())
     res = EditResult()
     lines = fabric.lines
     req = QgsFeatureRequest().setFilterRect(union.boundingBox()).setFilterExpression(
         "%s AND %s" % (CURRENT, type_expr(ptype)))
     from . import parcel_numbers as PN
-    # one edit: if the merged parcel can't be built, the parents and inner lines come back
+    from .history import _qdate
+    rec = fabric.record_by_id(record)
+    start = _qdate(rec["RecordedDate"]) if rec is not None else None
+    # one edit: if the merged parcel can't be saved, the parents and inner lines come back
     with EditSession([fabric.parcels, lines, fabric.points, fabric.records, fabric.lineage], "Merge") as ed:
         covered = []
+        band_box = boundary.boundingBox()
+        band_box.grow(tol * 2)
         for f in list(lines.getFeatures(req)):
             if f["RetiredByRecord"]:
                 continue
@@ -629,37 +696,49 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
             if union.contains(mid) and boundary.distance(mid) > tol:
                 ed.change(lines, f.id(), "RetiredByRecord", record)
                 res.lines_retired += 1
-            else:
-                covered.append((f.id(), seg))
-        # The inner parcel's own boundary can lie along the outer line without sharing
-        # a corner. Build cannot close that loop, so drop a line the others already cover.
+            elif seg.boundingBox().intersects(band_box):
+                covered.append((f, seg))
+        # The inner parcel's own boundary can lie on the outer line without a shared
+        # corner. Retire the shorter line when one line already covers it.
+        # shortcut: a line covered only by two collinear pieces is kept, upgrade if a merge leaves a doubled boundary.
         band = boundary.buffer(tol, 2)
-        again = True
-        while again:
-            again = False
-            for i, (fid, seg) in enumerate(covered):
-                if not band.contains(seg):
+        on_edge = [(f, seg) for f, seg in covered if band.contains(seg)]
+        retired = set()
+        for f, seg in on_edge:
+            fid = f.id()
+            for f2, seg2 in on_edge:
+                fid2 = f2.id()
+                if fid2 == fid or fid2 in retired:
                     continue
-                others = [s for j, (_fid, s) in enumerate(covered) if j != i]
-                if others and QgsGeometry.unaryUnion(others).buffer(tol, 2).contains(seg):
+                longer = seg2.length() > seg.length() + 1e-6
+                same = abs(seg2.length() - seg.length()) <= 1e-6 and fid > fid2
+                if (longer or same) and seg2.buffer(tol, 2).contains(seg):
                     ed.change(lines, fid, "RetiredByRecord", record)
                     res.lines_retired += 1
-                    del covered[i]
-                    again = True
+                    retired.add(fid)
                     break
         for p in parents:
             ed.change(fabric.parcels, p.id(), "RetiredByRecord", record)
+            if start is not None:
+                ed.change(fabric.parcels, p.id(), "QPF_EndDate", start)
             res.parents_retired += 1
         retire_orphan_points(fabric, union, record, ed, ptype)
-        rep = build_parcels(fabric, ptype, None, union.boundingBox().buffered(tol * 10), new_record=record,
-                            number=False, within=union.buffer(tol, 4),
-                            groups=[[p.pointOnSurface() for p in polys]])
-        res.issues = [i for i in rep.issues if i.severity != "info"]
-        kids = _by_gid(fabric, rep.new_ids)
-        if len(kids) != 1 or len(parts_of(kids[0].geometry())) != len(polys):
-            raise EditError("Nothing was saved, because the merged parcel couldn't be built. "
-                            + "; ".join(i.message for i in rep.issues))
-        kid = kids[0]
+        fields = fabric.parcels.fields()
+        kid = QgsFeature(fields)
+        kid.setGeometry(geom)
+        base = {"GlobalID": S.new_guid(), "ParcelType": ptype, "IsSeed": 0, "StatedAreaUnit": 1,
+                "CreatedByRecord": record, "CalculatedArea": geom.area()}
+        kept = [(f, seg) for f, seg in covered if f.id() not in retired]
+        ms = _merge_misclose(fabric, polys, kept, tol)
+        if ms is not None:
+            base["MiscloseDistance"], base["MiscloseRatio"] = ms
+        if start is not None:
+            base["QPF_StartDate"] = start
+        for k, v in base.items():
+            i = fields.indexOf(k)
+            if i >= 0:
+                kid.setAttribute(i, v)
+        ed.add(fabric.parcels, kid)
         values = {}
         if keep_number:
             values = PN.number_fields(keep_number)
@@ -675,12 +754,79 @@ def merge_parcels(fabric, parents, record, keep_number=None, apart=False):
                 res.messages.append("merged parcel not numbered: %s" % e)
         for k, v in values.items():
             ed.change(fabric.parcels, kid.id(), k, v)
-        update_record_footprint(fabric, record, ed)
         kid = fabric.parcels.getFeature(kid.id())
+        _merge_footprint(fabric, rec, ed, geom, parents, kid)
         res.children = [kid["ParcelNumber"] or kid["Name"] or "%d polygon(s)" % len(polys)]
         L.add(fabric, record, "Merge", parents, [kid])
-    _dates(fabric, [record])
     return res
+
+
+def _merge_misclose(fabric, polys, lines, tol):
+    """Worst COGO misclose of the boundary lines that stay, or None if a loop has no COGO."""
+    from .cogo import loop_misclose
+    from .topo import chain_ring
+    worst = None
+    for poly in polys:
+        ring = QgsGeometry(poly.constGet().boundary())
+        bnd = []
+        for f, seg in lines:
+            curve = _single_curve(f.geometry())
+            if curve is None:
+                continue
+            s, e = _ends(curve)
+            if not (_on(ring, s, tol) and _on(ring, e, tol)):
+                continue
+            mid = seg.interpolate(seg.length() / 2.0).asPoint()
+            if _on(ring, (mid.x(), mid.y()), tol):
+                bnd.append((f, s, e))
+        chain = chain_ring([(f.id(), s, e) for f, s, e in bnd], tol)
+        if not chain:
+            return None
+        by_id = {f.id(): f for f, _s, _e in bnd}
+        ms = loop_misclose([(fabric.course_from_feature(by_id[fid]), rev) for fid, rev in chain])
+        if ms is None:
+            return None
+        dx, dy, per, _area = ms
+        mdist = math.hypot(dx, dy)
+        mratio = (per / mdist) if mdist > 1e-9 else None
+        rank = math.inf if mratio is None else mratio
+        if worst is None or rank < worst[0]:
+            worst = (rank, mdist, mratio)
+    return None if worst is None else (worst[1], worst[2])
+
+
+def _merge_footprint(fabric, rec, ed, geom, parents, kid):
+    """Grow the record outline from what this merge already knows.
+
+    A full reread of every parcel that record created is what makes a merge
+    slow when one record owns a whole county.
+    """
+    if rec is None:
+        return
+    try:
+        n = int(rec["ParcelCount"] or 0)
+    except (TypeError, ValueError):
+        n = 0
+    g = rec.geometry() if rec.hasGeometry() else None
+    if g is not None and not g.isNull():
+        # shortcut: retired parents stay inside this outline, upgrade if a merge must shrink it
+        grown = QgsGeometry.unaryUnion([_seg(g), _seg(geom)])
+        grown.convertToMultiType()
+        ed.set_geometry(fabric.records, rec.id(), grown)
+        dropped = sum(1 for p in parents if p["CreatedByRecord"] == rec["GlobalID"])
+        ed.change(fabric.records, rec.id(), "ParcelCount", max(1, n - dropped + 1))
+        return
+    if n == 0:
+        one = QgsGeometry(geom)
+        one.convertToMultiType()
+        ed.set_geometry(fabric.records, rec.id(), one)
+        ed.change(fabric.records, rec.id(), "ParcelCount", 1)
+        pid = kid["ParcelID"] or kid["ParcelNumber"]
+        if pid and rec.fields().indexOf("QPF_ParcelID") >= 0 and not rec["QPF_ParcelID"]:
+            ed.change(fabric.records, rec.id(), "QPF_ParcelID", str(pid)[:30])
+        return
+    # shortcut: a record with a count but no outline still reads every parcel it created, upgrade if that read shows up
+    update_record_footprint(fabric, rec["GlobalID"], ed)
 
 
 def separate_parcel(fabric, parent, record, remainder_keeps=True):

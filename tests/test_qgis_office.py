@@ -149,6 +149,33 @@ class NeighborTests(unittest.TestCase):
         self.assertNotIn("MultiSurface", single.asWkt())
         self.assertTrue(single.asWkt().startswith("MultiPolygon"))
 
+    def test_a_straight_merged_parcel_is_not_written_as_multisurface(self):
+        # Build stores a straight loop as a CurvePolygon. convertToStraightSegment
+        # leaves that type alone when there is no arc, so merge wrote
+        # MultiSurface (CurvePolygon ...) and SQL Server rejected the save.
+        from types import SimpleNamespace
+        from qgis.core import QgsCurvePolygon, QgsGeometry, QgsLineString, QgsPoint, QgsVectorLayer
+        ring = QgsLineString([
+            QgsPoint(X0, Y0), QgsPoint(X0, Y0 + 200), QgsPoint(X0 + 200, Y0 + 200),
+            QgsPoint(X0 + 200, Y0), QgsPoint(X0, Y0)])
+        hole = QgsLineString([
+            QgsPoint(X0 + 40, Y0 + 40), QgsPoint(X0 + 40, Y0 + 90),
+            QgsPoint(X0 + 90, Y0 + 90), QgsPoint(X0 + 90, Y0 + 40),
+            QgsPoint(X0 + 40, Y0 + 40)])
+        poly = QgsCurvePolygon()
+        poly.setExteriorRing(ring)
+        poly.addInteriorRing(hole)
+        reported = QgsVectorLayer("MultiSurface?crs=epsg:2238", "parcels", "memory").wkbType()
+        mssql = SimpleNamespace(wkbType=lambda: reported, providerType=lambda: "mssql")
+        geom = _parcel_geometry(SimpleNamespace(multipart=True, parcels=mssql), [poly])
+        self.assertTrue(geom.asWkt().startswith("MultiPolygon"), geom.asWkt()[:80])
+        self.assertNotIn("MultiSurface", geom.asWkt())
+        self.assertNotIn("Curve", geom.asWkt())
+        self.assertAlmostEqual(geom.area(), 200 * 200 - 50 * 50, places=3)
+        plain = QgsVectorLayer("MultiPolygon?crs=epsg:2238", "parcels", "memory")
+        again = _parcel_geometry(SimpleNamespace(multipart=True, parcels=plain), [poly.clone()])
+        self.assertTrue(again.asWkt().startswith("MultiPolygon"), again.asWkt()[:80])
+
     def test_db_transaction_wraps_even_a_single_mssql_layer(self):
         # commitChanges() on one layer still sends attribute changes and added
         # features as separate statements, so a single started mssql layer needs
@@ -569,6 +596,43 @@ class OfficeTests(_Base):
         self.assertEqual(len(res.children), 1)
         self.assertEqual(sum(1 for _ in self.fab.lines.getFeatures(
             QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL'))), 4)
+
+    def test_a_merged_inner_parcel_can_be_split_on_its_old_lines(self):
+        # The old inner boundary includes the side that lies on the outer line
+        # and does not share a corner. Tracing that whole loop is the cut.
+        from qgis.PyQt.QtCore import QVariant
+        from qgis.core import QgsField
+        lyr = QgsVectorLayer("Polygon?crs=epsg:2238", "county", "memory")
+        lyr.dataProvider().addAttributes([QgsField("PIN", QVariant.String)])
+        lyr.updateFields()
+
+        def feat(geom, pin):
+            f = QgsFeature(lyr.fields())
+            f.setGeometry(geom)
+            f.setAttribute("PIN", pin)
+            return f
+
+        lyr.dataProvider().addFeatures([
+            feat(box(X0, Y0, X0 + 200, Y0 + 200), "OUT"),
+            feat(box(X0, Y0 + 40, X0 + 90, Y0 + 90), "IN"),
+        ])
+        rec = self.fab.create_record("Existing parcels", "Existing")
+        X.import_parcel_layer(self.fab, lyr, "Tax", rec, "PIN")
+        parents = list(self.fab.parcels.getFeatures())
+        E.merge_parcels(self.fab, parents, self.rec)
+        merged = next(self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL')))
+        # Start at an inside corner, so the shared side is in the middle of the trace.
+        cut = QgsGeometry.fromPolylineXY([
+            QgsPointXY(X0 + 90, Y0 + 90), QgsPointXY(X0 + 90, Y0 + 40),
+            QgsPointXY(X0, Y0 + 40), QgsPointXY(X0, Y0 + 90),
+            QgsPointXY(X0 + 90, Y0 + 90)])
+        res = E.cut_parcel(self.fab, merged, [cut], self.rec)
+        current = list(self.fab.parcels.getFeatures(
+            QgsFeatureRequest().setFilterExpression('"RetiredByRecord" IS NULL')))
+        self.assertEqual(len(current), 2, [i.message for i in res.issues])
+        areas = sorted(round(f.geometry().area()) for f in current)
+        self.assertEqual(areas, [4500, 35500])
 
     def test_merge_reports_the_actual_gap_when_parcels_dont_touch(self):
         from qgis.PyQt.QtCore import QVariant

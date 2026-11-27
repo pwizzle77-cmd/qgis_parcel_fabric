@@ -33,16 +33,55 @@ def number_fields(number):
     return N.fields_for(number)
 
 
-def unfiltered(layer):
-    """A second copy of ``layer`` without its subset filter (sees retired)."""
+_OPEN = {}   # (provider, uri) -> layer with no subset filter
+
+
+def _source_key(layer):
     reg = QgsProviderRegistry.instance()
     prov = layer.providerType()
     parts = reg.decodeUri(prov, layer.source())
     for k in ("subset", "sql"):
         parts.pop(k, None)
-    uri = reg.encodeUri(prov, parts)
-    lyr = QgsVectorLayer(uri, layer.name() + " (all)", prov)
-    return lyr if lyr.isValid() else layer
+    return prov, reg.encodeUri(prov, parts)
+
+
+def drop_unfiltered(layer):
+    """Forget the cached copy after a commit so the next read sees it."""
+    try:
+        _OPEN.pop(_source_key(layer), None)
+    except Exception:
+        return
+
+
+def unfiltered(layer, refresh=False):
+    """A second copy of ``layer`` without its subset filter (sees retired).
+
+    The copy is kept and reused, so a parcel history does not open a new
+    database connection for every parcel. ``refresh`` reloads it.
+    """
+    try:
+        key = _source_key(layer)
+    except Exception:
+        key = None
+    lyr = _OPEN.get(key) if key else None
+    if lyr is not None:
+        try:
+            ok = lyr.isValid()
+        except RuntimeError:
+            ok = False
+        if not ok:
+            _OPEN.pop(key, None)
+            lyr = None
+    if lyr is None:
+        if not key:
+            return layer
+        lyr = QgsVectorLayer(key[1], layer.name() + " (all)", key[0])
+        if not lyr.isValid():
+            return layer
+        _OPEN[key] = lyr
+    elif refresh:
+        lyr.reload()
+    return lyr
 
 
 def used_numbers(fabric):
@@ -50,7 +89,7 @@ def used_numbers(fabric):
     out = set()
     req = QgsFeatureRequest().setSubsetOfAttributes(["ParcelNumber"], fabric.parcels.fields())
     req.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
-    for lyr in (unfiltered(fabric.parcels), fabric.parcels):
+    for lyr in (unfiltered(fabric.parcels, refresh=True), fabric.parcels):
         for f in lyr.getFeatures(req):
             v = f["ParcelNumber"]
             if v:
@@ -217,7 +256,7 @@ def find_parcel(fabric, number, current_only=False):
     expr = '"ParcelNumber" = \'%s\'' % str(number).replace("'", "''")
     if current_only:
         expr += " AND " + CURRENT
-    for lyr in (fabric.parcels, unfiltered(fabric.parcels)):
+    for lyr in (fabric.parcels, unfiltered(fabric.parcels, refresh=True)):
         for f in lyr.getFeatures(QgsFeatureRequest().setFilterExpression(expr)):
             return f
     return None

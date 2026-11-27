@@ -9,6 +9,23 @@ from .fabric import Fabric
 ACTIVE_FABRIC_KEY = ("ParcelFabric", "active_fabric")
 
 
+def _parcel_spatial_index(fabric):
+    """One spatial index on Parcels, so a map click does not read every parcel."""
+    try:
+        from qgis.core import Qgis, QgsMessageLog
+        from . import maintenance as M
+        made = M.ensure_spatial_indexes(fabric, ("parcels",), once=True)
+    except Exception as e:
+        from qgis.core import Qgis, QgsMessageLog
+        QgsMessageLog.logMessage("Could not add a spatial index on Parcels: %s" % e,
+                                 "Parcel Fabric", Qgis.MessageLevel.Warning)
+        return
+    if made:
+        QgsMessageLog.logMessage(
+            "Added a spatial index on Parcels. Selecting a parcel no longer reads the whole table.",
+            "Parcel Fabric", Qgis.MessageLevel.Info)
+
+
 class FabricManager(QObject):
     fabricsChanged = pyqtSignal()
     activeFabricChanged = pyqtSignal()
@@ -41,6 +58,7 @@ class FabricManager(QObject):
             self._active_id = saved if ok and saved in ids else (ids[0] if ids else None)
         for f in self.fabrics:
             f._configure_layers()
+            _parcel_spatial_index(f)
         self.fabricsChanged.emit()
         if old != self._active_id:
             self.activeFabricChanged.emit()

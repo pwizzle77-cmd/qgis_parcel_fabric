@@ -3,7 +3,7 @@
 
 Each one works on the features selected in the fabric's Parcels (or Parcel
 Lines) layer and the active record.  They stay open, so you can do several
-edits in a row.
+edits in a row.  Merge closes after a successful merge.
 """
 
 import math
@@ -206,9 +206,9 @@ class _EditWindow(QDialog):
             for lyr in self._layers():
                 lyr.removeSelection()
             self.report(res)
-            self.after_apply()
+            self.after_apply(res)
 
-    def after_apply(self):
+    def after_apply(self, res=None):
         pass
 
     def closeEvent(self, e):
@@ -298,7 +298,7 @@ class SplitWindow(_EditWindow):
         res = E.cut_parcel(fab, sel[0], [self.cut], record, "Split", self.keep.isChecked())
         return res
 
-    def after_apply(self):
+    def after_apply(self, res=None):
         self.cut = None
         self.cut_lbl.setText("No cut line yet.")
 
@@ -476,6 +476,13 @@ class MergeWindow(_EditWindow):
 
     def apply(self, fab, record):
         return E.merge_parcels(fab, self.selected(), record, self.number.currentData(), self.apart.isChecked())
+
+    def after_apply(self, res=None):
+        if res is None or res.issues:
+            return
+        QMessageBox.information(self.iface.mainWindow(), self.TITLE,
+                                "Merge succeeded. %s" % res.summary())
+        self.close()
 
 
 # --------------------------------------------------------------------------

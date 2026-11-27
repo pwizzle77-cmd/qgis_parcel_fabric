@@ -66,7 +66,7 @@ def refresh_dates(fabric, records=None):
     ``records``: only parcels created or retired by these record GlobalIDs
     (default: every parcel).  Returns how many parcels changed.
     """
-    lyr = unfiltered(fabric.parcels)
+    lyr = unfiltered(fabric.parcels, refresh=True)
     if lyr.fields().indexOf("QPF_StartDate") < 0:
         S.add_missing_fields(lyr, S.ROLE_PARCELS)
     dates = record_dates(fabric)
@@ -122,7 +122,8 @@ def history_layer(fabric, project=None):
     lyr = find_history_layer(fabric, project)
     if lyr is not None:
         return lyr
-    lyr = unfiltered(fabric.parcels)
+    # Clone so naming and filtering this layer does not change the shared copy.
+    lyr = unfiltered(fabric.parcels).clone()
     lyr.setName("Parcel History")
     lyr.setCustomProperty(PROP_FABRIC, fabric.id)
     lyr.setCustomProperty(PROP_ROLE, ROLE_HISTORY)

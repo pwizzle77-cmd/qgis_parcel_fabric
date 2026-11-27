@@ -5,7 +5,7 @@ import csv
 import datetime
 import html
 
-from qgis.core import QgsFeature, QgsFeatureRequest
+from qgis.core import Qgis, QgsFeature, QgsFeatureRequest
 
 from . import schema as S
 from .fabric import EditSession, quote
@@ -36,29 +36,49 @@ def add(fabric, record_gid, operation, parents, children):
     return len(feats)
 
 
-def _rows(fabric, field, gid):
-    req = QgsFeatureRequest().setFilterExpression('"%s" = %s' % (field, quote(gid)))
-    return list(fabric.lineage.getFeatures(req))
-
-
 _CACHE = {}
+_INFO_FIELDS = ("GlobalID", "ParcelNumber", "Name", "ParcelType", "RetiredByRecord",
+                "CreatedByRecord", "QPF_StartDate")
+
+
+def prime(fabric, gids, refresh=False):
+    """Load attributes for these parcel GlobalIDs in one query per batch."""
+    missing = [g for g in dict.fromkeys(gids) if g and (fabric.id, g) not in _CACHE]
+    if not missing:
+        return
+    lyr = unfiltered(fabric.parcels, refresh=refresh)
+    fields = lyr.fields()
+    has_start = fields.indexOf("QPF_StartDate") >= 0
+    idx = [fields.indexOf(n) for n in _INFO_FIELDS if fields.indexOf(n) >= 0]
+    found = set()
+    for i in range(0, len(missing), 200):
+        chunk = missing[i:i + 200]
+        req = QgsFeatureRequest().setFilterExpression(
+            '"GlobalID" IN (%s)' % ", ".join(quote(g) for g in chunk))
+        req.setFlags(Qgis.FeatureRequestFlag.NoGeometry)
+        if idx:
+            req.setSubsetOfAttributes(idx)
+        for f in lyr.getFeatures(req):
+            gid = f["GlobalID"]
+            found.add(gid)
+            info = {"gid": gid, "number": f["ParcelNumber"] or "", "name": f["Name"] or "",
+                    "type": f["ParcelType"] or "", "retired": f["RetiredByRecord"] or None,
+                    "record": "", "start": f["QPF_StartDate"] if has_start else None}
+            rec = fabric.record_by_id(f["CreatedByRecord"]) if f["CreatedByRecord"] else None
+            info["record"] = (rec["Name"] if rec is not None else "") or ""
+            _CACHE[(fabric.id, gid)] = info
+    blank = {"number": "", "name": "", "type": "", "retired": None, "record": "", "start": None}
+    for g in missing:
+        if g not in found:
+            _CACHE[(fabric.id, g)] = dict(blank, gid=g)
 
 
 def parcel_info(fabric, gid):
     """Number, name, type, retired-by and record name of a parcel (retired too)."""
     key = (fabric.id, gid)
-    if key in _CACHE:
-        return _CACHE[key]
-    info = {"gid": gid, "number": "", "name": "", "type": "", "retired": None, "record": ""}
-    req = QgsFeatureRequest().setFilterExpression('"GlobalID" = %s' % quote(gid))
-    for f in unfiltered(fabric.parcels).getFeatures(req):
-        info.update(number=f["ParcelNumber"] or "", name=f["Name"] or "", type=f["ParcelType"] or "",
-                    retired=f["RetiredByRecord"] or None)
-        rec = fabric.record_by_id(f["CreatedByRecord"]) if f["CreatedByRecord"] else None
-        info["record"] = (rec["Name"] if rec is not None else "") or ""
-        break
-    _CACHE[key] = info
-    return info
+    if key not in _CACHE:
+        prime(fabric, [gid])
+    return _CACHE[key]
 
 
 def clear_cache():
@@ -73,18 +93,29 @@ def walk(fabric, gid, up=True, limit=200):
     """
     edges, seen, todo = [], {gid}, [gid]
     truncated = False
+    field = "ChildID" if up else "ParentID"
+    other = "ParentID" if up else "ChildID"
+    flags = Qgis.FeatureRequestFlag.NoGeometry
     while todo:
         if len(edges) >= limit:
             truncated = True
             break
-        cur = todo.pop(0)
-        for r in _rows(fabric, "ChildID" if up else "ParentID", cur):
-            e = (r["ParentID"], r["ChildID"], r["Operation"], r["RecordID"])
-            edges.append(e)
-            nxt = r["ParentID"] if up else r["ChildID"]
+        batch = todo[:80]
+        del todo[:80]
+        req = QgsFeatureRequest().setFilterExpression(
+            '"%s" IN (%s)' % (field, ", ".join(quote(g) for g in batch)))
+        req.setFlags(flags)
+        for r in fabric.lineage.getFeatures(req):
+            if len(edges) >= limit:
+                truncated = True
+                break
+            edges.append((r["ParentID"], r["ChildID"], r["Operation"], r["RecordID"]))
+            nxt = r[other]
             if nxt not in seen:
                 seen.add(nxt)
                 todo.append(nxt)
+        if truncated:
+            break
     return edges, truncated
 
 

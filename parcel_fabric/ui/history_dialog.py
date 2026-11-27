@@ -112,10 +112,7 @@ class HistoryDialog(QDialog):
         self.timer.setInterval(1500)
         self.timer.timeout.connect(self._next)
 
-        try:
-            H.refresh_dates(self.fabric)
-        except Exception as e:      # still usable; dates may just be stale
-            self.head.setText("Couldn't update history dates: %s" % e)
+        # Dates are not rebuilt on open: that read every parcel. Update Dates still does.
         self.hist = H.history_layer(self.fabric)
         H.set_project_time_range(self.fabric)
         self._from_selection(True)
@@ -161,6 +158,7 @@ class HistoryDialog(QDialog):
         edges = list(dict.fromkeys(up + down))
         self.members = F.descendants(down, roots) | (F.roots(up, gid) if self.whole.isChecked() else set())
         self.members |= {gid}
+        L.prime(self.fabric, self.members, refresh=True)
         self.gen = F.generations(edges, self.members)
         dates = {k: v.toString("yyyy-MM-dd") for k, v in H.record_dates(self.fabric).items()}
         names = H.record_names(self.fabric)
@@ -198,11 +196,8 @@ class HistoryDialog(QDialog):
         self.list.setCurrentRow(0)
 
     def _start(self, gid):
-        req = QgsFeatureRequest().setFilterExpression('"GlobalID" = %s' % quote(gid))
-        for f in unfiltered(self.fabric.parcels).getFeatures(req):
-            d = H._qdate(f["QPF_StartDate"])
-            return d.toString("yyyy-MM-dd") if d else ""
-        return ""
+        d = H._qdate(L.parcel_info(self.fabric, gid).get("start"))
+        return d.toString("yyyy-MM-dd") if d else ""
 
     def _label(self, gid):
         i = L.parcel_info(self.fabric, gid)

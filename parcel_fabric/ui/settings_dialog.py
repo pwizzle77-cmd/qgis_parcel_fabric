@@ -224,8 +224,9 @@ class SettingsDialog(QDialog):
             "<b>Database maintenance</b><br>A fabric only grows: a split, merge or import never "
             "deletes anything, only retires it. These keep that healthy as a fabric ages.<br><br>"
             "<b>Create Indexes</b> adds indexes on the fields every current-parcel query filters or "
-            "joins by (GlobalID, RetiredByRecord, CreatedByRecord...) - safe to run again later, an "
-            "index that already exists is left alone.<br><b>Update Statistics</b> refreshes the "
+            "joins by (GlobalID, RetiredByRecord, CreatedByRecord...) and a spatial index so clicking "
+            "a parcel does not read the whole table. Safe to run again later: an index that already "
+            "exists is left alone.<br><b>Update Statistics</b> refreshes the "
             "database's query planner so it knows how the fabric has grown.<br><b>Reclaim Space</b> "
             "compacts the database, recovering space years of retired rows leave behind (SQL Server "
             "rebuilds indexes instead, which has the same effect there).")

@@ -158,12 +158,123 @@ def _execute(provider, source, sql, autocommit=False):
     return len(sql)
 
 
+# Geometry tables a click has to search. Lineage and settings have no geometry.
+SPATIAL_ROLES = ("parcels", "lines", "points", "connections", "records", "lots", "blocks",
+                 "subdivisions")
+# shortcut: the index box is the data extent plus 10 miles, upgrade by dropping qpf_six_* if an insert reports the bounding box does not cover the geometry
+_SPATIAL_TRIED = set()
+
+
+def spatial_index_name(table, column):
+    return "qpf_six_%s_%s" % (table, column)
+
+
+def spatial_index_batch(schema, table, column):
+    """One SQL Server batch: a spatial index so a map click does not read every row.
+
+    Skips the work when that index is already there. An empty table is left alone.
+    """
+    schema = schema or "dbo"
+    column = column or "geom"
+    name = spatial_index_name(table, column).replace("'", "''")
+    sch, tbl, col = _br(schema), _br(table), _br(column)
+    obj = "%s.%s" % (schema.replace("'", "''"), table.replace("'", "''"))
+    return (
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'%s' "
+        "AND object_id = OBJECT_ID(N'%s'))\n"
+        "BEGIN\n"
+        "  DECLARE @xmin float, @ymin float, @xmax float, @ymax float\n"
+        "  SELECT @xmin = MIN(e.STPointN(1).STX), @ymin = MIN(e.STPointN(1).STY),\n"
+        "         @xmax = MAX(e.STPointN(3).STX), @ymax = MAX(e.STPointN(3).STY)\n"
+        "  FROM (SELECT [%s].STEnvelope() AS e FROM [%s].[%s] WHERE [%s] IS NOT NULL) s\n"
+        "  IF @xmin IS NOT NULL\n"
+        "  BEGIN\n"
+        "    DECLARE @pad float = 52800\n"
+        "    SET @xmin = @xmin - @pad\n"
+        "    SET @ymin = @ymin - @pad\n"
+        "    SET @xmax = @xmax + @pad\n"
+        "    SET @ymax = @ymax + @pad\n"
+        "    DECLARE @sql nvarchar(max) = N'CREATE SPATIAL INDEX [%s] ON [%s].[%s]([%s]) "
+        "WITH (BOUNDING_BOX = (' + LTRIM(STR(@xmin, 20, 3)) + N',' + LTRIM(STR(@ymin, 20, 3)) "
+        "+ N',' + LTRIM(STR(@xmax, 20, 3)) + N',' + LTRIM(STR(@ymax, 20, 3)) + N'))'\n"
+        "    EXEC sys.sp_executesql @sql\n"
+        "  END\n"
+        "END"
+        % (name, obj, col, sch, tbl, col, name, sch, tbl, col))
+
+
+def _sql_server_layer(layer):
+    """(schema, table, geometry column, connection source) for a native SQL Server layer."""
+    if layer is None or layer.providerType() != "mssql":
+        return None
+    from qgis.core import QgsDataSourceUri
+    uri = QgsDataSourceUri(layer.source())
+    table = uri.table()
+    if not table:
+        return None
+    return uri.schema() or "dbo", table, uri.geometryColumn() or "geom", layer.source()
+
+
+def _mssql_connection(source):
+    from qgis.core import QgsDataSourceUri, QgsProviderRegistry
+    md = QgsProviderRegistry.instance().providerMetadata("mssql")
+    uri = QgsDataSourceUri(source)
+    uri.setTable("")
+    uri.setGeometryColumn("")
+    return md.createConnection(uri.uri(False), {})
+
+
+def ensure_spatial_indexes(fabric, roles=None, once=False):
+    """Add a SQL Server spatial index on each named role that does not have one.
+
+    ``once`` remembers a try for this QGIS session, so opening the project does
+    not build the same index again. Returns how many indexes were created.
+    GeoPackage fabrics already have one and are left alone.
+    """
+    roles = roles or SPATIAL_ROLES
+    made = 0
+    for role in roles:
+        lyr = fabric.layers.get(role)
+        info = _sql_server_layer(lyr)
+        if info is None:
+            continue
+        schema, table, column, source = info
+        key = (schema, table, column)
+        if once and key in _SPATIAL_TRIED:
+            continue
+        if once:
+            _SPATIAL_TRIED.add(key)
+        conn = _mssql_connection(source)
+        name = spatial_index_name(table, column).replace("'", "''")
+        obj = "%s.%s" % (schema.replace("'", "''"), table.replace("'", "''"))
+        found = conn.executeSql(
+            "SELECT 1 FROM sys.indexes WHERE name = N'%s' AND object_id = OBJECT_ID(N'%s')"
+            % (name, obj))
+        if found:
+            continue
+        from qgis.core import Qgis, QgsMessageLog
+        QgsMessageLog.logMessage(
+            "Building a spatial index on %s. This reads the table once." % table,
+            "Parcel Fabric", Qgis.MessageLevel.Info)
+        conn.executeSql(spatial_index_batch(schema, table, column))
+        made += 1
+    return made
+
+
 def create_indexes(fabric):
     """Add any of the standard indexes this fabric's tables are missing. Returns the count."""
     if _any_editing(fabric):
         raise RuntimeError("Save or discard fabric edits first.")
     provider, source, schema, tables = target(fabric)
-    return _execute(provider, source, index_statements(provider, schema, tables))
+    n = _execute(provider, source, index_statements(provider, schema, tables))
+    # The button should try again even if opening the project already tried.
+    for role in SPATIAL_ROLES:
+        lyr = fabric.layers.get(role)
+        info = _sql_server_layer(lyr)
+        if info is not None:
+            _SPATIAL_TRIED.discard(info[:3])
+    n += ensure_spatial_indexes(fabric)
+    return n
 
 
 def update_statistics(fabric):

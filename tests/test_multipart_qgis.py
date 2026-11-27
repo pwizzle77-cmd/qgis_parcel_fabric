@@ -265,7 +265,8 @@ class MultipartTests(_Multi):
         mgr = SimpleNamespace(active=self.fab, active_record_id=self.m, activeRecordChanged=Mock(),
                               active_record=lambda: self.fab.record_by_id(self.m))
         with patch.object(ED.QMessageBox, "warning", side_effect=lambda *x: self.fail(x[2])), \
-                patch.object(ED.QMessageBox, "critical", side_effect=lambda *x: self.fail(x[2])):
+                patch.object(ED.QMessageBox, "critical", side_effect=lambda *x: self.fail(x[2])), \
+                patch.object(ED.QMessageBox, "information") as info:
             self.fab.parcels.selectByIds([f.id() for f in self.now()])
             w = ED.MergeWindow(iface, mgr)
             self.assertTrue(w.apart.isEnabled())
@@ -273,6 +274,8 @@ class MultipartTests(_Multi):
             w.number.setCurrentIndex(1)
             w._run()
             self.assertEqual(len(self.now()), 1)
+            info.assert_called_once()
+            self.assertIn("Merge succeeded", info.call_args[0][2])
             w.close()
             self.fab.parcels.selectByIds([self.now()[0].id()])
             w = ED.SeparateWindow(iface, mgr)

@@ -81,6 +81,13 @@ def match_wkb_type(target, g):
     curved = QgsWkbTypes.isCurvedType(want) and (not multi or curved_multi_is_safe(target))
     if not curved:
         g.convertToStraightSegment()
+        if QgsWkbTypes.isCurvedType(g.wkbType()):
+            # A straight CurvePolygon has no arc, so convertToStraightSegment leaves
+            # the MultiSurface type. SQL Server rejects that label.
+            dest = Qgis.WkbType.MultiPolygon if multi else Qgis.WkbType.Polygon
+            coerced = g.coerceToType(dest)
+            if coerced:
+                g = coerced[0]
     if g.isMultipart() and not multi:
         parts = parts_of(g)
         if len(parts) != 1:

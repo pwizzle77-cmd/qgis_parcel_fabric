@@ -56,6 +56,16 @@ def test_analyze_and_vacuum_run_cleanly(tmp_path):
     db.close()
 
 
+def test_sql_server_spatial_index_is_skipped_when_present():
+    sql = M.spatial_index_batch("dbo", "Parcels", "geom")
+    assert "CREATE SPATIAL INDEX [qpf_six_Parcels_geom]" in sql
+    assert "ON [dbo].[Parcels]([geom])" in sql
+    assert "BOUNDING_BOX" in sql
+    assert "IF NOT EXISTS" in sql
+    assert "52800" in sql
+    assert M.spatial_index_name("Parcels", "geom") == "qpf_six_Parcels_geom"
+
+
 def test_server_sql_mentions_every_table_and_field():
     tables = {"parcels": "Parcels", "lineage": "Parcel_Lineage"}
     for prov in ("postgres", "mssql"):

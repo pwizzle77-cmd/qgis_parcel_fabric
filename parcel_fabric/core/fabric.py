@@ -875,17 +875,24 @@ class EditSession:
         return False
 
     def _db_transaction(self):
-        """One DB transaction across every started layer that shares a transactional
-        backend (mssql, postgres), so a later layer's failed write rolls everything
-        on this edit back - instead of leaving an earlier layer's commit (a parcel
-        retired, say) stranded with nothing to replace it.
+        """One DB transaction across every started layer that can share one, so a later
+        layer's failed write rolls everything on this edit back - instead of leaving an
+        earlier layer's commit (a parcel retired, say) stranded with nothing to replace it.
 
         Wraps even a single such layer: commitChanges() on one layer still sends
         attribute changes and added features as separate statements, so without a
         transaction a feature-add failure can leave that same layer's own attribute
         changes (a parcel marked retired, say) already saved with nothing to replace it.
+
+        Tried for anything but a plain "memory" layer, which can't support one at all -
+        not just "mssql"/"postgres": a SQL Server table reached through a generic ODBC
+        connection (rather than QGIS's own MSSQL provider) shows up as an "ogr" layer,
+        same as GeoPackage, with no reliable way to tell the two apart by provider type
+        alone. QgsTransaction.create()/begin() themselves say whether it actually works;
+        if it doesn't, this falls back to committing each layer on its own exactly as
+        before, so trying costs nothing on a backend that can't do it.
         """
-        started = [lx for lx in self._started if lx.providerType() in ("mssql", "postgres")]
+        started = [lx for lx in self._started if lx.providerType() != "memory"]
         if not started:
             return None
         try:

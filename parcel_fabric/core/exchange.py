@@ -327,18 +327,19 @@ def _surface_parts(geom):
 def _pack_parcel(target, parts):
     """The geometry for these parts.
 
-    A curve stays a curve only when the table can store one. Lots, blocks and
-    subdivisions are plain MultiPolygon. SQL Server rejects MultiSurface WKT,
-    so those curves are stored as straight segments there - even when the
-    mssql layer's own wkb type claims to be a curved multi type, which its
-    generic "geometry" column can report with no way to actually store it.
+    A curve stays a curve only when the table can store one, and - see
+    curved_multi_is_safe() - almost nothing can store a MULTI-part curve
+    (MultiSurface/MultiCurve), SQL Server included, even when the layer's own
+    wkb type claims to be one. Lots, blocks and subdivisions are plain
+    MultiPolygon so this rarely matters for them; Parcels is where it does.
     """
     from qgis.core import QgsMultiPolygon, QgsMultiSurface, QgsWkbTypes
+    from .geomio import curved_multi_is_safe
     want = target.wkbType()
     multi = QgsWkbTypes.isMultiType(want)
     if not multi and len(parts) != 1:
         return None
-    curved = QgsWkbTypes.isCurvedType(want) and not (multi and target.providerType() == "mssql")
+    curved = QgsWkbTypes.isCurvedType(want) and (not multi or curved_multi_is_safe(target))
     owned = []
     for part in parts:
         body = part.constGet()
@@ -1228,6 +1229,7 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
     ``blocked`` and ``changed``) and changes nothing - for a preview before the
     real sync.
     """
+    import time
     from qgis.core import QgsWkbTypes
     from .numbering import NumberError, fields_for, is_placeholder
 
@@ -1242,6 +1244,8 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
     if source.crs() != fabric.parcels.crs():
         xf = QgsCoordinateTransform(source.crs(), fabric.parcels.crs(), QgsProject.instance())
 
+    timings = {}
+    t0 = time.perf_counter()
     _tell(progress, 0, "Sync: reading the source layer")
     source_parts, source_fids = {}, {}
     total = source.featureCount()
@@ -1271,7 +1275,9 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
         source_parts.setdefault(number, []).append(g)
         source_fids.setdefault(number, []).append(feat.id())
     source_geom = {n: (g[0] if len(g) == 1 else QgsGeometry.unaryUnion(g)) for n, g in source_parts.items()}
+    timings["source"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     _tell(progress, 35, "Sync: reading the fabric's current parcels")
     fabric_parts, fabric_fids = {}, {}
     expr = '%s AND %s AND ("IsSeed" IS NULL OR "IsSeed" = 0)' % (type_expr(ptype), CURRENT)
@@ -1293,14 +1299,18 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
         fabric_fids.setdefault(number, []).append(f.id())
         fabric_parts.setdefault(number, []).append(QgsGeometry(g))
     fabric_geom = {n: (g[0] if len(g) == 1 else QgsGeometry.unaryUnion(g)) for n, g in fabric_parts.items()}
+    timings["fabric"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     missing = sorted(set(fabric_geom) - set(source_geom))
     changed = []
     for number in sorted(set(fabric_geom) & set(source_geom)):
         if not _same_enough(fabric_geom[number], source_geom[number]):
             changed.append({"number": number, "old_area": fabric_geom[number].area(),
                             "new_area": source_geom[number].area()})
+    timings["compare"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     candidates = sorted(set(source_geom) - set(fabric_geom))
     restorable, blocked = {}, []
     if candidates:
@@ -1330,11 +1340,12 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
             else:
                 blocked.append({"number": number, "reason": "retired with a different outline"})
     new = sorted(set(candidates) - set(restorable) - {b["number"] for b in blocked})
+    timings["retired_check"] = time.perf_counter() - t0
 
     if dry_run:
         _tell(progress, 100, "Sync preview finished")
         return {"missing": missing, "new": new, "restorable": sorted(restorable), "blocked": blocked,
-                "changed": changed}
+                "changed": changed, "timings": timings}
 
     retired = 0
     if missing:
@@ -1358,6 +1369,7 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
                 ed.change(fabric.parcels, fid, "RetiredByUser", None)
                 restored += 1
 
+    t0 = time.perf_counter()
     if not new:
         added = dict(_ZERO_IMPORT)
     else:
@@ -1374,9 +1386,10 @@ def sync_parcel_layer(fabric, source, ptype, record, number_field, progress=None
 
         added = import_parcel_layer(fabric, new_layer, ptype, record, number_field,
                                     progress=on_import, **import_kwargs)
+    timings["import"] = time.perf_counter() - t0
     _tell(progress, 100, "Sync finished")
     return dict(added, retired=retired, restored=restored, missing=missing, new=new,
-               blocked=blocked, changed=changed)
+               blocked=blocked, changed=changed, timings=timings)
 
 
 def _write_features(layer, batch):

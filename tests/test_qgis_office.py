@@ -119,6 +119,36 @@ class NeighborTests(unittest.TestCase):
         self.assertNotIn("MultiSurface", single.asWkt())
         self.assertTrue(single.asWkt().startswith("MultiPolygon"))
 
+    def test_build_straightens_a_sql_server_table_reached_through_a_generic_odbc_connection(self):
+        # A SQL Server table opened through a plain ODBC connection (rather than QGIS's
+        # own MSSQL provider) reports providerType() "ogr" - same as GeoPackage - so a
+        # provider-type check alone can't tell the two apart. Only a GeoPackage (.gpkg)
+        # source, or postgres, is trusted to actually store a multi-part curve.
+        from types import SimpleNamespace
+        from qgis.core import (
+            QgsCircularString, QgsCompoundCurve, QgsCurvePolygon, QgsGeometry,
+            QgsLineString, QgsPoint, QgsVectorLayer,
+        )
+        a, b = QgsPoint(X0, Y0), QgsPoint(X0, Y0 + 100)
+        c, d = QgsPoint(X0 + 100, Y0 + 100), QgsPoint(X0 + 100, Y0)
+        ring = QgsCompoundCurve()
+        ring.addCurve(QgsLineString([a, b]))
+        ring.addCurve(QgsCircularString(b, QgsPoint(X0 + 50, Y0 + 140), c))
+        ring.addCurve(QgsLineString([c, d, a]))
+        poly = QgsCurvePolygon()
+        poly.setExteriorRing(ring)
+        reported_type = QgsVectorLayer("MultiSurface?crs=epsg:2238", "parcels", "memory").wkbType()
+        odbc_parcels = SimpleNamespace(wkbType=lambda: reported_type, providerType=lambda: "ogr",
+                                       source=lambda: "DSN=CountyGIS;driver={ODBC Driver 17 for SQL Server};"
+                                                      "table=\"dbo\".\"Parcels\" (Shape) sql=")
+        fake_fabric = SimpleNamespace(multipart=True, parcels=odbc_parcels)
+        geom = _parcel_geometry(fake_fabric, [poly])
+        self.assertNotIn("MultiSurface", geom.asWkt())
+        self.assertTrue(geom.asWkt().startswith("MultiPolygon"))
+        single = X._pack_parcel(odbc_parcels, [QgsGeometry(poly.clone())])
+        self.assertNotIn("MultiSurface", single.asWkt())
+        self.assertTrue(single.asWkt().startswith("MultiPolygon"))
+
     def test_db_transaction_wraps_even_a_single_mssql_layer(self):
         # commitChanges() on one layer still sends attribute changes and added
         # features as separate statements, so a single started mssql layer needs
@@ -133,6 +163,31 @@ class NeighborTests(unittest.TestCase):
                 tr = ed._db_transaction()
         self.assertIsNotNone(tr)
         MockTransaction.create.assert_called_once_with(ed._started)
+
+    def test_db_transaction_tries_an_ogr_layer_too_not_just_mssql_by_name(self):
+        # A SQL Server table reached through a generic ODBC connection (rather than
+        # QGIS's own MSSQL provider) reports providerType() "ogr", same as GeoPackage -
+        # there's no provider-type string to tell them apart, so this has to try for
+        # "ogr" too and let QgsTransaction.create()/begin() themselves say whether it
+        # actually works, instead of only ever trying for a hardcoded "mssql"/"postgres".
+        from unittest.mock import Mock, patch
+        ed = EditSession.__new__(EditSession)
+        ed._started = [Mock(providerType=Mock(return_value="ogr"))]
+        with patch("parcel_fabric.core.fabric.QgsTransaction") as MockTransaction:
+            MockTransaction.create.return_value.begin.return_value = True
+            with patch("parcel_fabric.core.fabric._result_ok", return_value=True):
+                tr = ed._db_transaction()
+        self.assertIsNotNone(tr)
+        MockTransaction.create.assert_called_once_with(ed._started)
+
+    def test_db_transaction_skips_a_memory_layer(self):
+        from unittest.mock import Mock, patch
+        ed = EditSession.__new__(EditSession)
+        ed._started = [Mock(providerType=Mock(return_value="memory"))]
+        with patch("parcel_fabric.core.fabric.QgsTransaction") as MockTransaction:
+            tr = ed._db_transaction()
+        self.assertIsNone(tr)
+        MockTransaction.create.assert_not_called()
 
     def test_default_style_hides_dense_layers_until_zoomed_in(self):
         from qgis.core import QgsVectorLayer
@@ -633,8 +688,10 @@ class OfficeTests(_Base):
         X.import_parcel_layer(self.fab, first, "Tax", rec, "PIN")
         later = self._county_layer([(box(X0 + 100, Y0, X0 + 200, Y0 + 100), "404-002")])  # 001 dropped, 002 new
         res = sync_parcel_layer(self.fab, later, "Tax", None, "PIN", dry_run=True)
+        timings = res.pop("timings")
         self.assertEqual(res, {"missing": ["404-001"], "new": ["404-002"], "restorable": [],
                                "blocked": [], "changed": []})
+        self.assertEqual(set(timings), {"source", "fabric", "compare", "retired_check"})
         current = {f["ParcelNumber"] for f in self.fab.parcels.getFeatures(
             QgsFeatureRequest().setFilterExpression(CURRENT))}
         self.assertEqual(current, {"404-001"})   # nothing actually happened

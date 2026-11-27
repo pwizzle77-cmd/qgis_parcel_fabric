@@ -38,6 +38,31 @@ def curve_segments(curve):
     return out
 
 
+def curved_multi_is_safe(target):
+    """Can ``target`` actually store a multi-part curved geometry (MultiSurface/MultiCurve)?
+
+    Almost nothing can. SQL Server's native "geometry" column has no WKT label for
+    either, even though it does accept a standalone CurvePolygon/CompoundCurve/
+    CircularString - and it isn't only the native "mssql" provider: a SQL Server
+    table reached through a generic ODBC connection shows up in QGIS as an "ogr"
+    layer too, same as GeoPackage, with no reliable way to ask the provider itself
+    whether its backend supports the type. So this is a short allow-list (GeoPackage,
+    PostGIS) instead of a block-list: everything else is assumed unable to, which is
+    the safe default and matches every provider actually confirmed to work.
+    """
+    if not hasattr(target, "providerType"):
+        return False
+    provider = target.providerType()
+    if provider == "postgres":
+        return True
+    if provider == "ogr":
+        try:
+            return ".gpkg" in target.source().lower()
+        except Exception:
+            return False
+    return False
+
+
 def match_wkb_type(target, g):
     """``g`` reshaped (curved/straight, single/multi) to fit ``target``'s own wkb type.
 
@@ -45,18 +70,15 @@ def match_wkb_type(target, g):
     just a wkb type for callers that have no layer to offer.
 
     MultiPolygon cannot store a curve: convertToMultiType would turn a CurvePolygon
-    into MultiSurface, and SQL Server rejects that WKT outright - and SQL Server's
-    generic "geometry" column can report its own wkbType as a curved multi type
-    (MultiSurface/MultiCurve) even though it has no WKT label for either, so a
-    multi-part mssql target never keeps curves regardless of what it reports.
+    into MultiSurface, which curved_multi_is_safe() above says almost nothing can
+    actually store, even when the target's own reported wkb type claims to be one.
     ``None`` if a multi-part geometry can't be squeezed into a single-part field.
     """
     from qgis.core import QgsWkbTypes
     want = target.wkbType() if hasattr(target, "wkbType") else target
-    provider = target.providerType() if hasattr(target, "providerType") else None
     g = QgsGeometry(g)
     multi = QgsWkbTypes.isMultiType(want)
-    curved = QgsWkbTypes.isCurvedType(want) and not (multi and provider == "mssql")
+    curved = QgsWkbTypes.isCurvedType(want) and (not multi or curved_multi_is_safe(target))
     if not curved:
         g.convertToStraightSegment()
     if g.isMultipart() and not multi:

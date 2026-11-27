@@ -497,6 +497,7 @@ class ExchangeDialog(QDialog):
             QMessageBox.critical(self, self.windowTitle(), "Sync preview failed: %s" % e)
             return
         self._end_progress()
+        self._say(self._timing_line(preview.get("timings")))
         if not any(preview[k] for k in ("missing", "new", "restorable", "blocked", "changed")):
             self._say("Nothing to sync - every parcel number matches.")
             QMessageBox.information(self, self.windowTitle(), "Nothing to sync - every parcel number matches.")
@@ -539,6 +540,17 @@ class ExchangeDialog(QDialog):
             bits.append("%d existing parcel(s) have a changed outline and were left alone: %s." % (
                 len(result["changed"]), ", ".join(c["number"] for c in result["changed"])))
         self._say(" ".join(bits))
+        self._say(self._timing_line(result.get("timings")))
+
+    @staticmethod
+    def _timing_line(timings):
+        """Where Sync's time actually went - this step is read, not run, every time."""
+        label = {"source": "reading source", "fabric": "reading fabric", "compare": "comparing",
+                 "retired_check": "checking retired", "import": "importing"}
+        if not timings:
+            return "Sync timing: not available."
+        return "Sync timing: " + ", ".join(
+            "%s %.1fs" % (label.get(k, k), v) for k, v in timings.items() if v is not None)
 
     # ------------------------------------------------------------------
     def _pro_tab(self):
